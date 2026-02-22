@@ -2,19 +2,35 @@
    TurboTracker — Per-message tracker UI
    ═══════════════════════════════════════════════════════════ */
 
-/* ── Outer collapsible block ─────────────────────────────── */
-.tt-block {
-    margin: 8px 0 4px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 6px;
-    background: rgba(0, 0, 0, 0.2);
-    overflow: hidden;
+/* ── Outer wrapper ───────────────────────────────────────── */
+.tt-container {
+    margin: 0 0 8px;
     font-size: 0.85em;
     color: var(--SmartThemeBodyColor, #ccc);
 }
 
-.tt-summary {
+/* ── Always-visible fields (Time, Location, Weather, Heart) ─ */
+.tt-always {
     padding: 6px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px 6px 0 0;
+    background: rgba(0, 0, 0, 0.2);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+/* ── Collapsible tracker block ───────────────────────────── */
+.tt-block {
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-top: none;
+    border-radius: 0 0 6px 6px;
+    background: rgba(0, 0, 0, 0.15);
+    overflow: hidden;
+}
+
+.tt-summary {
+    padding: 5px 10px;
     cursor: pointer;
     user-select: none;
     font-weight: bold;
@@ -23,6 +39,7 @@
     align-items: center;
     gap: 6px;
     color: var(--SmartThemeBodyColor, #ccc);
+    opacity: 0.7;
 }
 
 /* Hide the native browser triangle */
@@ -32,7 +49,7 @@
 /* Custom arrow */
 .tt-summary::before {
     content: '▶';
-    font-size: 0.7em;
+    font-size: 0.65em;
     transition: transform 0.15s ease;
     display: inline-block;
 }
@@ -41,21 +58,13 @@
     transform: rotate(90deg);
 }
 
-/* ── Fields area ─────────────────────────────────────────── */
-.tt-fields {
-    padding: 4px 10px 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    border-top: 1px solid rgba(255, 255, 255, 0.07);
-}
-
+/* ── Shared row layout ───────────────────────────────────── */
 .tt-row {
     display: flex;
     gap: 8px;
     align-items: baseline;
     flex-wrap: wrap;
-    padding: 2px 0;
+    padding: 1px 0;
 }
 
 .tt-label {
@@ -69,9 +78,17 @@
     flex: 1;
 }
 
+/* ── Fields area inside collapsible ─────────────────────── */
+.tt-fields {
+    padding: 6px 10px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
 /* ── Characters Present sub-dropdown ─────────────────────── */
 .tt-chars {
-    margin-top: 6px;
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 4px;
     background: rgba(0, 0, 0, 0.15);
@@ -145,6 +162,85 @@
     content: ':';
 }
 
+/* ── Action buttons (Regenerate / Edit) ───────────────────── */
+.tt-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 2px;
+}
+
+.tt-actions .menu_button {
+    font-size: 0.85em;
+    padding: 3px 10px;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   TurboTracker — Inline edit form
+   ═══════════════════════════════════════════════════════════ */
+
+.tt-editing {
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.25);
+    overflow: hidden;
+}
+
+.tt-edit-form {
+    padding: 8px 10px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.tt-edit-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.tt-edit-label {
+    min-width: 100px;
+    font-weight: 600;
+    opacity: 0.75;
+    flex-shrink: 0;
+    font-size: 0.9em;
+}
+
+.tt-edit-input {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.9em;
+}
+
+.tt-edit-heart {
+    flex: 0 0 110px;
+}
+
+.tt-edit-chars-row {
+    align-items: flex-start;
+}
+
+.tt-edit-chars {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.85em;
+    font-family: monospace;
+    resize: vertical;
+}
+
+.tt-edit-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 4px;
+}
+
+.tt-edit-actions .menu_button {
+    font-size: 0.85em;
+    padding: 3px 10px;
+}
+
 /* ═══════════════════════════════════════════════════════════
    TurboTracker — Settings panel
    ═══════════════════════════════════════════════════════════ */
@@ -161,10 +257,6 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-}
-
-.tt-setting-row label {
-    flex-shrink: 0;
 }
 
 .tt-setting-row small {
