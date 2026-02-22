@@ -103,7 +103,7 @@ function esc(text) {
  * Layout:
  *   [tt-container]
  *     [tt-always]  ← Time, Location, Weather, Heart — always visible
- *     <details.tt-block> ← 🧿 Tracker — collapsible
+ *     <details.tt-block> ← 👁️ Tracker — collapsible
  *       Characters Present (collapsible)
  *       Regenerate / Edit buttons
  *     </details>
@@ -141,7 +141,7 @@ function buildTrackerHtml(data, mesId) {
                     <span class="tt-value">${esc(data.time     || 'Unknown')}</span>
                 </div>
                 <div class="tt-row">
-                    <span class="tt-label">📍 Location</span>
+                    <span class="tt-label">🗺️ Location</span>
                     <span class="tt-value">${esc(data.location || 'Unknown')}</span>
                 </div>
                 <div class="tt-row">
@@ -154,7 +154,7 @@ function buildTrackerHtml(data, mesId) {
                 </div>
             </div>
             <details class="tt-block">
-                <summary class="tt-summary"><span>🧿 Tracker</span></summary>
+                <summary class="tt-summary"><span>👁️ Tracker</span></summary>
                 <div class="tt-fields">
                     ${charsHtml}
                     <div class="tt-actions">
@@ -188,7 +188,7 @@ function buildEditFormHtml(data, mesId) {
                            value="${esc(data.time || '')}" placeholder="h:MM AM/PM; MM/DD/YYYY (DayOfWeek)">
                 </div>
                 <div class="tt-edit-row">
-                    <label class="tt-edit-label">📍 Location</label>
+                    <label class="tt-edit-label">🗺️ Location</label>
                     <input class="tt-edit-input text_pole" id="tt-edit-location-${mesId}"
                            value="${esc(data.location || '')}" placeholder="Location description">
                 </div>
