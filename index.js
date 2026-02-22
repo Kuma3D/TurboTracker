@@ -1,17 +1,16 @@
 import {
     eventSource,
     event_types,
-    saveChat,
-    generateQuietPrompt,
     saveSettingsDebounced,
+    setExtensionPrompt,
+    extension_prompt_types,
+    generateQuietPrompt,
 } from '../../../../script.js';
 
 import {
     extension_settings,
     getContext,
-    setExtensionPrompt,
-    INJECTION_POSITION,
-} from '../../../../scripts/extensions.js';
+} from '../../../extensions.js';
 
 const EXT_NAME = 'turbo-tracker';
 
@@ -231,7 +230,7 @@ function processMessage(mesId) {
     msg.extra = msg.extra || {};
     msg.extra.tt_tracker = data;
 
-    saveChat();
+    getContext().saveChat();
     saveSettingsDebounced();
     renderMessageTracker(mesId);
     injectPrompt();
@@ -242,7 +241,7 @@ function processMessage(mesId) {
 function injectPrompt() {
     const s = getSettings();
     if (!s.enabled) {
-        setExtensionPrompt(EXT_NAME, '', INJECTION_POSITION.AFTER_CHAR_DEFS, 0);
+        setExtensionPrompt(EXT_NAME, '', extension_prompt_types.IN_PROMPT, 0);
         return;
     }
 
@@ -271,7 +270,7 @@ Characters section:
 
 Update only values that have changed from the previous block. Never omit the block.`;
 
-    setExtensionPrompt(EXT_NAME, prompt, INJECTION_POSITION.AFTER_CHAR_DEFS, s.scanDepth);
+    setExtensionPrompt(EXT_NAME, prompt, extension_prompt_types.IN_PROMPT, s.scanDepth);
 }
 
 // ── Retroactive population ────────────────────────────────────
@@ -363,7 +362,7 @@ characters:
             status.text(`${done} / ${aiMessages.length} messages…`);
         }
 
-        await saveChat();
+        await getContext().saveChat();
         saveSettingsDebounced();
         status.text('Done!');
         setTimeout(() => status.text(''), 3000);
