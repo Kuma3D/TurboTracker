@@ -6,11 +6,15 @@ A [SillyTavern](https://github.com/SillyTavern/SillyTavern) extension that track
 
 ## Features
 
-- **Per-message tracker** — a collapsible "📊 Tracker" panel appears below each AI message
+- **Always-visible tracker** — Time, Location, Weather, and Heart Meter are permanently displayed above each AI message, never hidden behind a dropdown
+- **👁️ Tracker panel** — a collapsible section per message holds the Characters Present list and action buttons
 - **Characters Present** — a nested dropdown listing every character in the scene with their current Outfit, State, and Position
-- **Heart Meter** — tracks romantic interest (0–69,999) with emoji indicators
-- **Clean display** — raw tracker tags are hidden from the chat; only the formatted UI is shown
-- **Retroactive population** — one-click button to use the AI to fill in tracker data for older messages that are missing it
+- **💘 Heart Meter** — tracks romantic interest (0–69,999) with color-coded emoji indicators
+- **Regenerate Tracker** — re-ask the AI to infer tracker data for any individual message
+- **Edit Tracker** — manually edit any tracker field inline directly in the chat
+- **Retroactive population** — one-click button to fill in tracker data for every message in an existing chat
+- **Clean display** — raw tracker tags are stripped from the visible message text; only the formatted UI is shown
+- **First-in-context injection** — tracker instructions are injected before the system prompt so they are always prioritized in the token budget
 - **Persistent** — tracker data is saved with the chat and survives page reloads
 
 ---
@@ -48,25 +52,28 @@ characters:
 [/TRACKER]
 ```
 
-The extension parses this block, stores the data with the message, and renders it as a collapsible UI. The raw tags are stripped from the visible message text.
+The extension parses this block, stores the data with the message, and renders it as a UI panel above the message text. The raw tags are stripped from the visible message.
 
 ---
 
 ## Tracker UI
 
-Each AI message gets a **📊 Tracker** dropdown containing:
+Each AI message displays a permanent info bar followed by a collapsible **👁️ Tracker** panel.
+
+**Always visible:**
 
 | Field | Description |
 |---|---|
 | ⏰ Time | In-world date and time |
-| 📍 Location | Current scene location |
+| 🗺️ Location | Current scene location |
 | 🌤️ Weather | Weather conditions and temperature |
-| Heart Meter | Romantic interest level with emoji |
+| 💘 Heart Meter | Romantic interest level with emoji indicator |
 
-Inside the **Characters Present** sub-dropdown, each character listed by the AI shows:
-- **Outfit** — what they're currently wearing
-- **State** — emotional or physical state
-- **Position** — where they are in the scene
+**Inside the 👁️ Tracker dropdown:**
+
+- **Characters Present** — a nested sub-dropdown; each character shows their Outfit, State, and Position
+- **Regenerate Tracker** — asks the AI to re-infer the tracker data for that specific message based on surrounding context
+- **Edit Tracker** — opens an inline edit form so you can manually adjust any field; supports all tracker fields and character entries
 
 ---
 
@@ -93,16 +100,17 @@ Open **Extensions → TurboTracker** in the SillyTavern sidebar:
 | Setting | Description |
 |---|---|
 | Enable TurboTracker | Toggle the extension on/off |
-| Prompt scan depth | How many recent messages the injected prompt covers (default: 5) |
-| Populate All Messages | Ask the AI to retroactively generate tracker data for messages that are missing it |
+| Populate All Messages | Ask the AI to retroactively generate tracker data for all messages missing it |
 
 ---
 
 ## Tips
 
 - **New chats** — TurboTracker starts working immediately on the first AI response
-- **Existing chats** — Use **Populate All Messages** to backfill tracker data; the AI will infer values from each message's surrounding context
-- **Editing messages** — If you manually edit an AI message and include a `[TRACKER]` block, TurboTracker will pick it up automatically
+- **Existing chats** — Use **Populate All Messages** to backfill tracker data; the AI infers values from each message's surrounding context
+- **Regenerate** — use the Regenerate Tracker button on any message to re-infer its tracker state without affecting the rest of the chat
+- **Edit** — use Edit Tracker to manually correct any field; characters are entered one per line in the same pipe-separated format the AI uses
+- **Editing messages** — if you manually edit an AI message and include a `[TRACKER]` block, TurboTracker will pick it up automatically
 
 ---
 
