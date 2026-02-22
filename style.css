@@ -1,0 +1,185 @@
+/* ═══════════════════════════════════════════════════════════
+   TurboTracker — Per-message tracker UI
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Outer collapsible block ─────────────────────────────── */
+.tt-block {
+    margin: 8px 0 4px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.2);
+    overflow: hidden;
+    font-size: 0.85em;
+    color: var(--SmartThemeBodyColor, #ccc);
+}
+
+.tt-summary {
+    padding: 6px 10px;
+    cursor: pointer;
+    user-select: none;
+    font-weight: bold;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--SmartThemeBodyColor, #ccc);
+}
+
+/* Hide the native browser triangle */
+.tt-summary::-webkit-details-marker { display: none; }
+.tt-summary::marker               { display: none; }
+
+/* Custom arrow */
+.tt-summary::before {
+    content: '▶';
+    font-size: 0.7em;
+    transition: transform 0.15s ease;
+    display: inline-block;
+}
+
+.tt-block[open] > .tt-summary::before {
+    transform: rotate(90deg);
+}
+
+/* ── Fields area ─────────────────────────────────────────── */
+.tt-fields {
+    padding: 4px 10px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.tt-row {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    flex-wrap: wrap;
+    padding: 2px 0;
+}
+
+.tt-label {
+    min-width: 110px;
+    font-weight: 600;
+    opacity: 0.75;
+    flex-shrink: 0;
+}
+
+.tt-value {
+    flex: 1;
+}
+
+/* ── Characters Present sub-dropdown ─────────────────────── */
+.tt-chars {
+    margin-top: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.15);
+}
+
+.tt-chars-summary {
+    padding: 5px 8px;
+    cursor: pointer;
+    user-select: none;
+    font-weight: 600;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--SmartThemeBodyColor, #ccc);
+}
+
+.tt-chars-summary::-webkit-details-marker { display: none; }
+.tt-chars-summary::marker               { display: none; }
+
+.tt-chars-summary::before {
+    content: '▶';
+    font-size: 0.65em;
+    transition: transform 0.15s ease;
+    display: inline-block;
+}
+
+.tt-chars[open] > .tt-chars-summary::before {
+    transform: rotate(90deg);
+}
+
+.tt-char-count {
+    opacity: 0.65;
+    font-weight: normal;
+    font-size: 0.9em;
+}
+
+/* ── Individual character cards ──────────────────────────── */
+.tt-chars-list {
+    padding: 6px 10px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.tt-char {
+    padding: 5px 8px;
+    border-left: 2px solid rgba(255, 255, 255, 0.18);
+}
+
+.tt-char-name {
+    font-weight: 700;
+    margin-bottom: 3px;
+    color: var(--SmartThemeBodyColor, #eee);
+}
+
+.tt-char-field {
+    display: flex;
+    gap: 6px;
+    font-size: 0.92em;
+}
+
+.tt-char-label {
+    font-weight: 600;
+    min-width: 62px;
+    opacity: 0.7;
+    flex-shrink: 0;
+}
+
+.tt-char-label::after {
+    content: ':';
+}
+
+/* ═══════════════════════════════════════════════════════════
+   TurboTracker — Settings panel
+   ═══════════════════════════════════════════════════════════ */
+
+.tt-settings .inline-drawer-content {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px 12px;
+}
+
+.tt-setting-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.tt-setting-row label {
+    flex-shrink: 0;
+}
+
+.tt-setting-row small {
+    opacity: 0.6;
+    flex-basis: 100%;
+    margin-top: 2px;
+}
+
+.tt-divider {
+    border: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    margin: 4px 0;
+}
+
+.tt-status {
+    opacity: 0.7;
+    font-size: 0.85em;
+}
