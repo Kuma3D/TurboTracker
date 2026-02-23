@@ -86,6 +86,82 @@ function parseTrackerBlock(text) {
     return result;
 }
 
+// ── SillyTavern-Tracker import ────────────────────────────────
+
+/**
+ * Convert a SillyTavern-Tracker data object to our tt_tracker format.
+ * ST-Tracker stores data on msg.tracker with PascalCase field names:
+ *   Time, Location, Weather, CharactersPresent (array), Characters (object by name)
+ *   Each character has: Outfit, StateOfDress, PostureAndInteraction, Hair, Makeup
+ */
+function convertSTTrackerToTT(stData) {
+    if (!stData || typeof stData !== 'object') return null;
+
+    const result = {
+        time:       stData.Time     || stData.time     || null,
+        location:   stData.Location || stData.location || null,
+        weather:    stData.Weather  || stData.weather  || null,
+        heart:      null,
+        characters: [],
+    };
+
+    const charNames = Array.isArray(stData.CharactersPresent) ? stData.CharactersPresent
+                    : Array.isArray(stData.charactersPresent) ? stData.charactersPresent
+                    : [];
+
+    const charDetails = (stData.Characters && typeof stData.Characters === 'object' && !Array.isArray(stData.Characters))
+                      ? stData.Characters
+                      : (stData.characters && typeof stData.characters === 'object' && !Array.isArray(stData.characters))
+                      ? stData.characters
+                      : {};
+
+    for (const name of charNames) {
+        const d = charDetails[String(name)] || {};
+        result.characters.push({
+            name:     String(name),
+            outfit:   d.Outfit             || d.outfit   || '',
+            state:    d.StateOfDress       || d.State    || d.state    || '',
+            position: d.PostureAndInteraction || d.Position || d.position || '',
+        });
+    }
+
+    if (result.time || result.location || result.weather || result.characters.length > 0) {
+        return result;
+    }
+    return null;
+}
+
+/**
+ * Try to import tracker data from SillyTavern-Tracker format.
+ * Checks msg.tracker (stored object) then <tracker>JSON</tracker> in message text.
+ * Returns converted tt_tracker data or null.
+ */
+function tryImportSTTracker(msg) {
+    if (msg.tracker && typeof msg.tracker === 'object' && Object.keys(msg.tracker).length > 0) {
+        return convertSTTrackerToTT(msg.tracker);
+    }
+
+    const textMatch = (msg.mes || '').match(/<tracker>([\s\S]*?)<\/tracker>/i);
+    if (textMatch) {
+        try {
+            const data = JSON.parse(textMatch[1].trim());
+            return convertSTTrackerToTT(data);
+        } catch (_) { /* not valid JSON */ }
+    }
+
+    return null;
+}
+
+/**
+ * Find the most recent tt_tracker in chat messages before the given index.
+ */
+function getMostRecentTracker(chat, beforeMesId) {
+    for (let i = beforeMesId - 1; i >= 0; i--) {
+        if (chat[i]?.extra?.tt_tracker) return chat[i].extra.tt_tracker;
+    }
+    return null;
+}
+
 // ── HTML helpers ──────────────────────────────────────────────
 
 function esc(text) {
@@ -104,18 +180,20 @@ function esc(text) {
  *   [tt-container]
  *     [tt-always]  ← Time, Location, Weather, Heart — always visible
  *     <details.tt-block> ← 👁️ Tracker — collapsible
- *       Characters Present (collapsible)
- *       Regenerate / Edit buttons
+ *       Characters Present: Name1, Name2 (header)
+ *       Character cards (always visible inside dropdown)
+ *       Regenerate / Edit buttons (Regenerate omitted on user messages)
  *     </details>
  *   [/tt-container]
  */
-function buildTrackerHtml(data, mesId) {
+function buildTrackerHtml(data, mesId, isUser = false) {
     const heartPts   = parseInt(data.heart, 10) || 0;
     const heartEmoji = getHeartEmoji(heartPts);
 
-    // Characters Present sub-dropdown
+    // Characters section — no sub-dropdown, directly visible inside Tracker
     let charsHtml = '';
     if (data.characters && data.characters.length > 0) {
+        const nameList = data.characters.map(c => esc(c.name)).join(', ');
         const cards = data.characters.map(c => `
             <div class="tt-char">
                 <div class="tt-char-name">${esc(c.name)}</div>
@@ -125,13 +203,14 @@ function buildTrackerHtml(data, mesId) {
             </div>`).join('');
 
         charsHtml = `
-            <details class="tt-chars">
-                <summary class="tt-chars-summary">
-                    Characters Present <span class="tt-char-count">(${data.characters.length})</span>
-                </summary>
-                <div class="tt-chars-list">${cards}</div>
-            </details>`;
+            <div class="tt-chars-header">Characters Present: <span class="tt-chars-names">${nameList}</span></div>
+            <div class="tt-chars-list">${cards}</div>`;
     }
+
+    const regenBtn = isUser ? '' : `
+                        <button class="tt-regen-btn menu_button menu_button_icon" data-mesid="${mesId}">
+                            <i class="fa-solid fa-rotate"></i> Regenerate Tracker
+                        </button>`;
 
     return `
         <div class="tt-container" data-mesid="${mesId}">
@@ -158,9 +237,7 @@ function buildTrackerHtml(data, mesId) {
                 <div class="tt-fields">
                     ${charsHtml}
                     <div class="tt-actions">
-                        <button class="tt-regen-btn menu_button menu_button_icon" data-mesid="${mesId}">
-                            <i class="fa-solid fa-rotate"></i> Regenerate Tracker
-                        </button>
+                        ${regenBtn}
                         <button class="tt-edit-btn menu_button menu_button_icon" data-mesid="${mesId}">
                             <i class="fa-solid fa-pen-to-square"></i> Edit Tracker
                         </button>
@@ -237,8 +314,9 @@ function getSettings() {
 
 /**
  * Inject (or refresh) the tracker UI for a single message.
+ * Works for both user and AI messages.
  * Tracker is placed BEFORE .mes_text so it appears at the top of the message.
- * Also strips the raw [TRACKER]...[/TRACKER] block from the displayed message text.
+ * Also strips the raw [TRACKER]...[/TRACKER] block from AI message display text.
  */
 function renderMessageTracker(mesId) {
     const el = $(`.mes[mesid="${mesId}"]`);
@@ -254,18 +332,21 @@ function renderMessageTracker(mesId) {
     const msg = ctx.chat[mesId];
     if (!msg || !msg.extra?.tt_tracker) return;
 
-    // Strip raw tracker tags from the displayed HTML
     const mesText = el.find('.mes_text');
-    mesText.html(
-        mesText.html().replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim()
-    );
 
-    // Insert tracker UI BEFORE the message text (top of message)
-    mesText.before(buildTrackerHtml(msg.extra.tt_tracker, mesId));
+    // Strip raw tracker tags from AI message display (user messages won't have them)
+    if (!msg.is_user) {
+        mesText.html(
+            mesText.html().replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim()
+        );
+    }
+
+    mesText.before(buildTrackerHtml(msg.extra.tt_tracker, mesId, msg.is_user));
 }
 
 /**
- * Parse tracker data from a message, store it, update the display.
+ * Parse tracker data from an AI message, store it, update the display.
+ * Also tries to import from SillyTavern-Tracker format as a fallback.
  */
 function processMessage(mesId) {
     const s = getSettings();
@@ -275,21 +356,32 @@ function processMessage(mesId) {
     const msg = ctx.chat[mesId];
     if (!msg || msg.is_user) return;
 
+    // 1. Try our own [TRACKER] format first
     const data = parseTrackerBlock(msg.mes || '');
-    if (!data) return;
-
-    if (data.heart !== null) {
-        const pts = parseInt(data.heart, 10);
-        if (!isNaN(pts)) s.heartPoints = Math.max(0, pts);
+    if (data) {
+        if (data.heart !== null) {
+            const pts = parseInt(data.heart, 10);
+            if (!isNaN(pts)) s.heartPoints = Math.max(0, pts);
+        }
+        msg.extra = msg.extra || {};
+        msg.extra.tt_tracker = data;
+        getContext().saveChat();
+        saveSettingsDebounced();
+        renderMessageTracker(mesId);
+        injectPrompt();
+        return;
     }
 
-    msg.extra = msg.extra || {};
-    msg.extra.tt_tracker = data;
-
-    getContext().saveChat();
-    saveSettingsDebounced();
-    renderMessageTracker(mesId);
-    injectPrompt();
+    // 2. Try importing from SillyTavern-Tracker format
+    const imported = tryImportSTTracker(msg);
+    if (imported) {
+        msg.extra = msg.extra || {};
+        msg.extra.tt_tracker = imported;
+        getContext().saveChat();
+        saveSettingsDebounced();
+        renderMessageTracker(mesId);
+        injectPrompt();
+    }
 }
 
 // ── Regenerate Tracker ────────────────────────────────────────
@@ -339,7 +431,6 @@ characters:
         }
     } catch (err) {
         console.warn(`[TurboTracker] Regen failed for message #${mesId}:`, err);
-        // Restore button if re-render didn't happen
         btn.prop('disabled', false).html('<i class="fa-solid fa-rotate"></i> Regenerate Tracker');
     }
 }
@@ -480,6 +571,17 @@ async function populateAllMessages() {
                 continue;
             }
 
+            // Try importing from ST-Tracker format
+            const imported = tryImportSTTracker(msg);
+            if (imported) {
+                msg.extra = msg.extra || {};
+                msg.extra.tt_tracker = imported;
+                renderMessageTracker(idx);
+                done++;
+                status.text(`${done} / ${aiMessages.length} messages…`);
+                continue;
+            }
+
             // Ask the AI to infer tracker values from chat context
             const start       = Math.max(0, idx - 6);
             const contextMsgs = ctx.chat.slice(start, idx + 1);
@@ -521,6 +623,18 @@ characters:
             status.text(`${done} / ${aiMessages.length} messages…`);
         }
 
+        // Auto-populate user messages by inheriting from adjacent AI trackers
+        ctx.chat.forEach((msg, idx) => {
+            if (msg.is_user && !msg.extra?.tt_tracker) {
+                const inherited = getMostRecentTracker(ctx.chat, idx);
+                if (inherited) {
+                    msg.extra = msg.extra || {};
+                    msg.extra.tt_tracker = { ...inherited };
+                    renderMessageTracker(idx);
+                }
+            }
+        });
+
         await getContext().saveChat();
         saveSettingsDebounced();
         status.text('Done!');
@@ -546,15 +660,57 @@ function onCharacterMessageRendered(mesId) {
     }
 }
 
+/**
+ * Fires when a user message is rendered (on chat load or new message sent).
+ * Attaches tracker data to the user message if not already present,
+ * inheriting from the most recent prior tracker in the chat.
+ */
+function onUserMessageRendered(mesId) {
+    const ctx = getContext();
+    const msg = ctx.chat[mesId];
+    if (!msg || !msg.is_user) return;
+
+    const s = getSettings();
+    if (!s.enabled) return;
+
+    if (msg.extra?.tt_tracker) {
+        renderMessageTracker(mesId);
+        return;
+    }
+
+    // Inherit the current tracker state from the most recent prior message
+    const inherited = getMostRecentTracker(ctx.chat, mesId);
+    if (!inherited) return;
+
+    msg.extra = msg.extra || {};
+    msg.extra.tt_tracker = { ...inherited };
+    ctx.saveChat();
+    renderMessageTracker(mesId);
+}
+
 function onChatChanged() {
     $('.tt-container').remove();
     injectPrompt();
+
+    // Re-render all messages that already have tracker data
+    const ctx = getContext();
+    if (!ctx.chat) return;
+    ctx.chat.forEach((msg, idx) => {
+        if (msg.extra?.tt_tracker) renderMessageTracker(idx);
+    });
 }
 
 function onMessageEdited(mesId) {
     const ctx = getContext();
     const msg = ctx.chat[mesId];
-    if (!msg || msg.is_user) return;
+    if (!msg) return;
+
+    if (msg.is_user) {
+        // For user messages, just re-render existing tracker if any
+        if (msg.extra?.tt_tracker) renderMessageTracker(mesId);
+        return;
+    }
+
     processMessage(mesId);
 }
 
@@ -562,7 +718,7 @@ function onMessageDeleted() {
     const ctx = getContext();
     if (!ctx.chat) return;
     ctx.chat.forEach((msg, idx) => {
-        if (!msg.is_user && msg.extra?.tt_tracker) renderMessageTracker(idx);
+        if (msg.extra?.tt_tracker) renderMessageTracker(idx);
     });
 }
 
@@ -616,6 +772,7 @@ jQuery(async () => {
     loadSettingsUi();
 
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onCharacterMessageRendered);
+    eventSource.on(event_types.USER_MESSAGE_RENDERED,      onUserMessageRendered);
     eventSource.on(event_types.CHAT_CHANGED,               onChatChanged);
     eventSource.on(event_types.MESSAGE_EDITED,             onMessageEdited);
     eventSource.on(event_types.MESSAGE_DELETED,            onMessageDeleted);
