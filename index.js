@@ -113,16 +113,17 @@ function parseTrackerBlock(text) {
 
         if (inChars && line.startsWith('-')) {
             const parts = line.slice(1).trim().split('|').map(p => p.trim());
-            const char = { name: '', outfit: '', state: '', position: '' };
+            const char = { name: '', description: '', outfit: '', state: '', position: '' };
             for (const part of parts) {
                 const sep = part.indexOf(':');
                 if (sep === -1) continue;
                 const k = part.slice(0, sep).trim().toLowerCase();
                 const v = part.slice(sep + 1).trim();
-                if      (k === 'name')     char.name     = v;
-                else if (k === 'outfit')   char.outfit   = v;
-                else if (k === 'state')    char.state    = v;
-                else if (k === 'position') char.position = v;
+                if      (k === 'name')        char.name        = v;
+                else if (k === 'description') char.description = v;
+                else if (k === 'outfit')      char.outfit      = v;
+                else if (k === 'state')       char.state       = v;
+                else if (k === 'position')    char.position    = v;
             }
             if (char.name) result.characters.push(char);
             continue;
@@ -172,10 +173,11 @@ function convertSTTrackerToTT(stData) {
     for (const name of charNames) {
         const d = charDetails[String(name)] || {};
         result.characters.push({
-            name:     String(name),
-            outfit:   d.Outfit               || d.outfit   || '',
-            state:    d.StateOfDress         || d.State    || d.state    || '',
-            position: d.PostureAndInteraction || d.Position || d.position || '',
+            name:        String(name),
+            description: d.Description || d.description || '',
+            outfit:      d.Outfit               || d.outfit   || '',
+            state:       d.StateOfDress         || d.State    || d.state    || '',
+            position:    d.PostureAndInteraction || d.Position || d.position || '',
         });
     }
 
@@ -223,7 +225,7 @@ function formatTrackerForPrompt(data) {
     if (data.characters && data.characters.length > 0) {
         text += '\ncharacters:';
         for (const c of data.characters) {
-            text += `\n- name: ${c.name} | outfit: ${c.outfit} | state: ${c.state} | position: ${c.position}`;
+            text += `\n- name: ${c.name} | description: ${c.description} | outfit: ${c.outfit} | state: ${c.state} | position: ${c.position}`;
         }
     }
     return text;
@@ -253,6 +255,7 @@ function buildTrackerHtml(data, mesId, isUser = false) {
         const cards = data.characters.map(c => `
             <div class="tt-char">
                 <div class="tt-char-name">${esc(c.name)}</div>
+                <div class="tt-char-field"><span class="tt-char-label">Description</span>${esc(c.description)}</div>
                 <div class="tt-char-field"><span class="tt-char-label">Outfit</span>${esc(c.outfit)}</div>
                 <div class="tt-char-field"><span class="tt-char-label">State</span>${esc(c.state)}</div>
                 <div class="tt-char-field"><span class="tt-char-label">Position</span>${esc(c.position)}</div>
@@ -308,7 +311,7 @@ function buildTrackerHtml(data, mesId, isUser = false) {
  */
 function buildEditFormHtml(data, mesId) {
     const charsText = (data.characters || [])
-        .map(c => `name: ${c.name} | outfit: ${c.outfit} | state: ${c.state} | position: ${c.position}`)
+        .map(c => `name: ${c.name} | description: ${c.description} | outfit: ${c.outfit} | state: ${c.state} | position: ${c.position}`)
         .join('\n');
 
     return `
@@ -337,7 +340,7 @@ function buildEditFormHtml(data, mesId) {
                 <div class="tt-edit-row tt-edit-chars-row">
                     <label class="tt-edit-label">👥 Characters</label>
                     <textarea class="tt-edit-chars text_pole" id="tt-edit-chars-${mesId}"
-                              rows="4" placeholder="name: Alice | outfit: ... | state: ... | position: ...">${esc(charsText)}</textarea>
+                              rows="4" placeholder="name: Alice | description: Brown hair, blue eyes, 5'7 | outfit: ... | state: ... | position: ...">${esc(charsText)}</textarea>
                 </div>
                 <div class="tt-edit-actions">
                     <button class="tt-edit-save menu_button menu_button_icon" data-mesid="${mesId}">
@@ -521,7 +524,7 @@ location: Full location description
 weather: Weather description, Temperature
 heart: ${prevHeart}
 characters:
-- name: CharacterName | outfit: Clothing description | state: State | position: Position
+- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
 [/TRACKER]`;
         } else {
             // AI message: infer from conversation context up to (and including) this message only —
@@ -549,7 +552,7 @@ location: Full location description
 weather: Weather description, Temperature
 heart: integer_value between ${heartLo} and ${heartHi}
 characters:
-- name: CharacterName | outfit: Clothing description | state: State | position: Position
+- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
 [/TRACKER]`;
         }
 
@@ -617,17 +620,18 @@ function saveEditedTracker(mesId) {
 
     const characters = charsRaw
         ? charsRaw.split('\n').filter(l => l.trim()).map(line => {
-            const char = { name: '', outfit: '', state: '', position: '' };
+            const char = { name: '', description: '', outfit: '', state: '', position: '' };
             const parts = line.split('|').map(p => p.trim());
             for (const part of parts) {
                 const sep = part.indexOf(':');
                 if (sep === -1) continue;
                 const k = part.slice(0, sep).trim().toLowerCase();
                 const v = part.slice(sep + 1).trim();
-                if      (k === 'name')     char.name     = v;
-                else if (k === 'outfit')   char.outfit   = v;
-                else if (k === 'state')    char.state    = v;
-                else if (k === 'position') char.position = v;
+                if      (k === 'name')        char.name        = v;
+                else if (k === 'description') char.description = v;
+                else if (k === 'outfit')      char.outfit      = v;
+                else if (k === 'state')       char.state       = v;
+                else if (k === 'position')    char.position    = v;
             }
             return char;
         }).filter(c => c.name)
@@ -696,7 +700,7 @@ location: Full location description
 weather: Weather condition, Temperature
 heart: integer_value
 characters:
-- name: CharacterName | outfit: Clothing description | state: Emotional/physical state | position: Where in the scene
+- name: CharacterName | description: Hair color, eye color, height, weight, notable features | outfit: Clothing description | state: Emotional/physical state | position: Where in the scene
 [/TRACKER]
 ${userMsgSection}
 PREVIOUS TRACKER STATE — your baseline. Update each field that the current exchange (user message + your response) requires; copy everything else forward exactly:
@@ -729,6 +733,7 @@ Heart Meter:
 Characters section:
   List every character currently present in the scene.
   Each line must use the pipe-separated format shown above.
+  description: brief physical description — hair color, eye color, height, weight, notable features. Pull from character/user card if available; infer or estimate if not.
   Include current outfit, emotional/physical state, and position in the scene.`;
 
     setExtensionPrompt(EXT_NAME, prompt, extension_prompt_types.BEFORE_PROMPT, 0);
@@ -839,7 +844,7 @@ location: Full location description
 weather: Weather description, Temperature
 heart: integer_value between ${populateHeartLo} and ${populateHeartHi}
 characters:
-- name: CharacterName | outfit: Clothing description | state: State | position: Position
+- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
 [/TRACKER]`;
 
             try {
