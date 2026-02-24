@@ -478,7 +478,7 @@ characters:
             genPrompt =
 `[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
 
-IMPORTANT: The time field is in-story fiction time, NOT real-world time. Start from the previous tracker time and advance only by a realistic amount for what the scene depicts.]
+IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance only by a realistic amount for what the scene depicts. If no previous time exists, invent one that fits the story's setting.]
 
 Previous tracker state:
 ${prevTrackerText}
@@ -597,31 +597,42 @@ function injectPrompt() {
     }
 
     const prompt = `[TurboTracker — mandatory instructions]
-At the very end of EVERY response, after all narrative text, append a tracker block using exactly this format:
+At the very end of EVERY response, after all narrative text, append a tracker block in exactly this format:
 
 [TRACKER]
-time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
+time: h:MM AM/PM; story-appropriate date (DayOfWeek)
 location: Full location description
-weather: Weather description, Temperature
+weather: Weather condition, Temperature
 heart: integer_value
 characters:
 - name: CharacterName | outfit: Clothing description | state: Emotional/physical state | position: Where in the scene
 [/TRACKER]
 
-CURRENT TRACKER STATE — use this as your starting point and carry all values forward unchanged unless the narrative requires an update:
+CURRENT TRACKER STATE — your starting point. Carry every value forward unchanged unless this response requires an update:
 ${currentTrackerText}
 
-FIELD RULES:
-  • Time: IN-STORY fiction time only. NEVER use the real-world current date or time. Start from the value above and advance by only the realistic amount depicted in this response (a few seconds to a few minutes for typical exchanges). Only jump hours or days if the narrative explicitly says so.
-  • Location: Change only if this response shows characters moving to a new place.
-  • Weather: Change only if this response gives a narrative reason for it to change.
+TIME RULES — this is the most important field to get right:
+  • The time field is IN-STORY fiction time. It must NEVER reflect the real-world current date or time.
+  • Always start from the time value shown above and advance it by only the realistic amount depicted in this response (seconds to a few minutes for brief exchanges).
+  • The date must match the story's setting (fantasy era, sci-fi calendar, historical period, etc.), not the real world.
+  • If this is the very first message and no previous time exists, invent a time and date that fits the story's world — do NOT use today's real date or the current clock time.
+  • Only jump hours or days if the narrative explicitly depicts that much time passing.
+
+  Correct examples (fictional — not real dates):
+    Sci-fi:    "9:10 PM; 01/20/31 BBY (Monday)"
+    Historical: "8:10 PM; 10/4/1452 (Monday)"
+    Fantasy:   "11:30 PM; Day 47, Third Age (Friday)"
+
+OTHER FIELD RULES:
+  • Location: Change only if this response shows characters moving somewhere new.
+  • Weather: Change only if the narrative gives a reason for it to change.
   • Characters: Add or remove only as the scene logically requires.
   • All other fields: copy the value above unchanged unless this response alters them.
 
 Heart Meter (current value: ${s.heartPoints}):
   Tracks the CHARACTER's romantic interest in {{user}}. Starting value: 0. Range: 0–69,999.
-  Only the character's emotions drive this — never change it based on user actions alone.
-  HARD LIMIT: maximum shift this response is ±${maxShift} points. Do not exceed this under any circumstances.
+  Only the character's emotions in this response drive this — never change based on user actions alone.
+  HARD LIMIT: maximum change this response is ±${maxShift} points. Do not exceed this under any circumstances.
   🖤 0–4,999   💜 5,000–19,999   💙 20,000–29,999   💚 30,000–39,999
   💛 40,000–49,999   🧡 50,000–59,999   ❤️ 60,000+
 
@@ -713,7 +724,7 @@ async function populateAllMessages() {
             const genPrompt =
 `[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
 
-IMPORTANT: The time field is in-story fiction time, NOT real-world time. Start from the previous tracker time and advance only by a realistic amount for what the scene depicts.]
+IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance only by a realistic amount for what the scene depicts. If no previous time exists, invent one that fits the story's setting.]
 
 Previous tracker state:
 ${prevTrackerText}
@@ -808,10 +819,25 @@ function onUserMessageRendered(mesId) {
 
 function onChatChanged() {
     $('.tt-container').remove();
+
+    // Sync heartPoints with the most recent tracker in the incoming chat.
+    // This ensures new chats always start at 0 and existing chats restore
+    // their correct value rather than inheriting the previous chat's state.
+    const s = getSettings();
+    const ctx = getContext();
+    let latestHeart = 0;
+    if (ctx?.chat) {
+        for (let i = ctx.chat.length - 1; i >= 0; i--) {
+            const h = ctx.chat[i]?.extra?.tt_tracker?.heart;
+            if (h != null) { latestHeart = parseInt(h, 10) || 0; break; }
+        }
+    }
+    s.heartPoints = latestHeart;
+    saveSettingsDebounced();
+
     injectPrompt();
 
-    const ctx = getContext();
-    if (!ctx.chat) return;
+    if (!ctx?.chat) return;
 
     let modified = false;
     ctx.chat.forEach((msg, idx) => {
