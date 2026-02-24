@@ -262,6 +262,50 @@
     opacity: 0.9;
 }
 
+.tt-heart-num-input {
+    width: 80px;
+    flex: 0 0 80px;
+    font-size: 0.9em;
+}
+
+.tt-heart-drawer-header {
+    font-size: 0.95em;
+    padding: 6px 8px;
+}
+
+.tt-heart-drawer-content {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px 10px 10px;
+}
+
+.tt-colors-header {
+    font-weight: 600;
+    opacity: 0.85;
+    font-size: 0.9em;
+    margin-bottom: 2px;
+}
+
+.tt-color-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.tt-color-emoji {
+    font-size: 1.1em;
+    min-width: 22px;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.tt-color-range-label {
+    font-size: 0.85em;
+    opacity: 0.65;
+    flex-shrink: 0;
+}
+
 .tt-divider {
     border: none;
     border-top: 1px solid rgba(255, 255, 255, 0.1);
