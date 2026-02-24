@@ -34,14 +34,50 @@ function getHeartEmoji(points) {
 
 /**
  * Clamp a new heart value so it cannot shift more than maxShift from prevHeart.
- * This is enforced in code regardless of what the AI outputs.
+ * Enforced in code regardless of what the AI outputs.
+ * All inputs are coerced to safe integers to guard against NaN from bad settings.
  */
 function clampHeart(rawValue, prevHeart, maxShift) {
-    const val = parseInt(rawValue, 10);
-    if (isNaN(val)) return prevHeart;
-    const lo = Math.max(0,     prevHeart - maxShift);
-    const hi = Math.min(69999, prevHeart + maxShift);
+    const val   = parseInt(rawValue,  10);
+    const prev  = parseInt(prevHeart, 10) || 0;
+    const shift = Math.max(1, parseInt(maxShift, 10) || 2500);
+    if (isNaN(val)) return prev;
+    const lo = Math.max(0,     prev - shift);
+    const hi = Math.min(69999, prev + shift);
     return Math.max(lo, Math.min(hi, val));
+}
+
+/**
+ * Advance the H:MM AM/PM portion of a tracker time string by the given minutes.
+ * Leaves the date/era suffix (e.g. "; 01/20/31 BBY (Monday)") unchanged.
+ * If the format isn't recognised, the original string is returned unmodified.
+ */
+function advanceTimeString(timeStr, minutes) {
+    if (!timeStr) return timeStr;
+    const m = timeStr.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)(.*)/i);
+    if (!m) return timeStr;
+
+    let hours = parseInt(m[1], 10);
+    let mins  = parseInt(m[2], 10);
+    const period = m[3].toUpperCase();
+    const rest   = m[4]; // everything after "AM/PM" (date, era, etc.)
+
+    // Convert to 24-hour
+    if (period === 'PM' && hours !== 12) hours += 12;
+    if (period === 'AM' && hours === 12) hours  = 0;
+
+    // Advance
+    mins  += minutes;
+    hours += Math.floor(mins / 60);
+    mins   = mins  % 60;
+    hours  = hours % 24;
+
+    // Convert back to 12-hour
+    const newPeriod = hours >= 12 ? 'PM' : 'AM';
+    let   newHours  = hours % 12;
+    if (newHours === 0) newHours = 12;
+
+    return `${newHours}:${String(mins).padStart(2, '0')} ${newPeriod}${rest}`;
 }
 
 // ── Tag parsing ───────────────────────────────────────────────
@@ -365,11 +401,15 @@ function populatePrecedingUserMessages(aiMesId) {
         if (!msg || !msg.is_user) break; // Stop at the previous AI message
         if (msg.extra?.tt_tracker) continue; // Already has one
 
-        // The tracker for a user message is whatever was current before that user sent their message
+        // The tracker for a user message is whatever was current before they sent their message,
+        // with time advanced by 1–3 minutes so every message has a unique, forward-moving timestamp.
         const tracker = getMostRecentTracker(ctx.chat, i);
         if (tracker) {
+            const advancedTracker = { ...tracker };
+            const nudge = 1 + Math.floor(Math.random() * 3); // 1–3 minutes
+            advancedTracker.time = advanceTimeString(tracker.time, nudge);
             msg.extra = msg.extra || {};
-            msg.extra.tt_tracker = { ...tracker };
+            msg.extra.tt_tracker = advancedTracker;
             renderMessageTracker(i);
             modified = true;
         }
@@ -394,7 +434,7 @@ function processMessage(mesId) {
     const data = parseTrackerBlock(msg.mes || '');
     if (data) {
         // Enforce heart shift limit in code — don't trust the AI to respect it
-        const maxShift = s.heartSensitivity * 500;
+        const maxShift = (Number(s.heartSensitivity) || 5) * 500;
         if (data.heart !== null) {
             data.heart = clampHeart(data.heart, s.heartPoints, maxShift);
             s.heartPoints = data.heart;
@@ -503,7 +543,7 @@ characters:
                 // Hard lock heart on user messages
                 data.heart = prevHeart;
             } else {
-                const maxShift = s.heartSensitivity * 500;
+                const maxShift = (Number(s.heartSensitivity) || 5) * 500;
                 if (data.heart !== null) {
                     data.heart = clampHeart(data.heart, s.heartPoints, maxShift);
                     s.heartPoints = data.heart;
@@ -583,7 +623,7 @@ function injectPrompt() {
         return;
     }
 
-    const maxShift = s.heartSensitivity * 500;
+    const maxShift = (Number(s.heartSensitivity) || 5) * 500;
 
     // Include the most recent tracker so the AI has a concrete starting point for every field
     const ctx = getContext();
@@ -629,10 +669,11 @@ OTHER FIELD RULES:
   • Characters: Add or remove only as the scene logically requires.
   • All other fields: copy the value above unchanged unless this response alters them.
 
-Heart Meter (current value: ${s.heartPoints}):
-  Tracks the CHARACTER's romantic interest in {{user}}. Starting value: 0. Range: 0–69,999.
-  Only the character's emotions in this response drive this — never change based on user actions alone.
-  HARD LIMIT: maximum change this response is ±${maxShift} points. Do not exceed this under any circumstances.
+Heart Meter:
+  Tracks the CHARACTER's romantic interest in {{user}}. Starts at 0 for every new story. Range: 0–69,999.
+  Only the character's own emotions drive this value — never adjust it based on user actions alone.
+  Current value: ${s.heartPoints}
+  THIS RESPONSE: the heart value MUST be between ${Math.max(0, s.heartPoints - maxShift)} and ${Math.min(69999, s.heartPoints + maxShift)}. Any value outside this range is an error.
   🖤 0–4,999   💜 5,000–19,999   💙 20,000–29,999   💚 30,000–39,999
   💛 40,000–49,999   🧡 50,000–59,999   ❤️ 60,000+
 
@@ -685,7 +726,7 @@ async function populateAllMessages() {
 
             const existing = parseTrackerBlock(msg.mes || '');
             if (existing) {
-                const maxShift = s.heartSensitivity * 500;
+                const maxShift = (Number(s.heartSensitivity) || 5) * 500;
                 if (existing.heart !== null) {
                     existing.heart = clampHeart(existing.heart, s.heartPoints, maxShift);
                     s.heartPoints = existing.heart;
@@ -744,7 +785,7 @@ characters:
                 const response = await generateQuietPrompt(genPrompt, false, true);
                 const data = parseTrackerBlock(response);
                 if (data) {
-                    const maxShift = s.heartSensitivity * 500;
+                    const maxShift = (Number(s.heartSensitivity) || 5) * 500;
                     if (data.heart !== null) {
                         data.heart = clampHeart(data.heart, s.heartPoints, maxShift);
                         s.heartPoints = data.heart;
@@ -879,7 +920,7 @@ function onMessageDeleted() {
 
 function loadSettingsUi() {
     const s = getSettings();
-    const maxShift = s.heartSensitivity * 500;
+    const maxShift = (Number(s.heartSensitivity) || 5) * 500;
 
     const html = `
 <div class="tt-settings">
@@ -928,10 +969,10 @@ function loadSettingsUi() {
     });
 
     $('#tt-heart-sensitivity').on('input', function () {
-        const val = parseInt(this.value);
+        const val = Number(this.value);
         getSettings().heartSensitivity = val;
         $('#tt-heart-sensitivity-val').text(val);
-        $('#tt-sensitivity-desc').text(`Max shift per AI response: \u00b1${val * 500} pts \u00a0(1 = slow \u2192 10 = fast, max \u00b15,000)`);
+        $('#tt-sensitivity-desc').text(`Max Heart Meter shift per AI response: \u00b1${val * 500} pts \u00a0(1\u2009=\u2009slow \u2192 10\u2009=\u2009fast)`);
         saveSettingsDebounced();
         injectPrompt();
     });
