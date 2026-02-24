@@ -535,7 +535,17 @@ characters:
 [/TRACKER]`;
         }
 
-        const response = await generateQuietPrompt(genPrompt, false, true);
+        // Suppress the "USER'S CURRENT MESSAGE" section during regen so the AI
+        // only considers context up to the message being regenerated, not future messages.
+        injectPrompt(false);
+        let response;
+        try {
+            response = await generateQuietPrompt(genPrompt, false, true);
+        } finally {
+            // Always restore the full prompt regardless of outcome
+            injectPrompt(true);
+        }
+
         const data = parseTrackerBlock(response);
         if (data) {
             const s = getSettings();
@@ -554,10 +564,10 @@ characters:
             await ctx.saveChat();
             saveSettingsDebounced();
             renderMessageTracker(mesId);
-            injectPrompt();
         }
     } catch (err) {
         console.warn(`[TurboTracker] Regen failed for message #${mesId}:`, err);
+        injectPrompt(true); // ensure prompt is restored on error too
         btn.prop('disabled', false).html('<i class="fa-solid fa-rotate"></i> Regenerate Tracker');
     }
 }
@@ -616,7 +626,7 @@ function saveEditedTracker(mesId) {
 
 // ── Prompt injection ──────────────────────────────────────────
 
-function injectPrompt() {
+function injectPrompt(includeLatestUserMsg = true) {
     const s = getSettings();
     if (!s.enabled) {
         setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
@@ -645,7 +655,7 @@ function injectPrompt() {
             break;
         }
     }
-    const userMsgSection = latestUserMsg
+    const userMsgSection = (includeLatestUserMsg && latestUserMsg)
         ? `\nUSER'S CURRENT MESSAGE — read this carefully before updating the tracker. Any scene changes the user describes (movement, time skip, weather mention, etc.) MUST be reflected in your tracker output:\n"${latestUserMsg}"\n`
         : '';
 
@@ -716,6 +726,10 @@ async function populateAllMessages() {
             status.text('No chat loaded.');
             return;
         }
+
+        // Suppress the "USER'S CURRENT MESSAGE" section for all quiet generations
+        // inside this loop — each prompt already supplies its own explicit context.
+        injectPrompt(false);
 
         const aiMessages = ctx.chat
             .map((msg, idx) => ({ msg, idx }))
@@ -834,6 +848,7 @@ characters:
     } finally {
         isPopulating = false;
         btn.prop('disabled', false);
+        injectPrompt(true); // restore full prompt when done
     }
 }
 
