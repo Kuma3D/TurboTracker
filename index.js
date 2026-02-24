@@ -625,9 +625,10 @@ function injectPrompt() {
 
     const maxShift = (Number(s.heartSensitivity) || 5) * 500;
 
-    // Include the most recent tracker so the AI has a concrete starting point for every field
-    const ctx = getContext();
+    const ctx  = getContext();
     const chat = ctx?.chat || [];
+
+    // Most recent tracker — concrete starting point for all fields
     let currentTrackerText = 'No previous tracker yet — this is the start of the story.';
     for (let i = chat.length - 1; i >= 0; i--) {
         if (chat[i]?.extra?.tt_tracker) {
@@ -635,6 +636,18 @@ function injectPrompt() {
             break;
         }
     }
+
+    // Most recent user message — used to tell the AI what scene changes to reflect
+    let latestUserMsg = '';
+    for (let i = chat.length - 1; i >= 0; i--) {
+        if (chat[i]?.is_user && chat[i].mes) {
+            latestUserMsg = chat[i].mes.slice(0, 800);
+            break;
+        }
+    }
+    const userMsgSection = latestUserMsg
+        ? `\nUSER'S CURRENT MESSAGE — read this carefully before updating the tracker. Any scene changes the user describes (movement, time skip, weather mention, etc.) MUST be reflected in your tracker output:\n"${latestUserMsg}"\n`
+        : '';
 
     const prompt = `[TurboTracker — mandatory instructions]
 At the very end of EVERY response, after all narrative text, append a tracker block in exactly this format:
@@ -647,31 +660,30 @@ heart: integer_value
 characters:
 - name: CharacterName | outfit: Clothing description | state: Emotional/physical state | position: Where in the scene
 [/TRACKER]
-
-CURRENT TRACKER STATE — your starting point. Carry every value forward unchanged unless this response requires an update:
+${userMsgSection}
+PREVIOUS TRACKER STATE — your baseline. Update each field that the current exchange (user message + your response) requires; copy everything else forward exactly:
 ${currentTrackerText}
 
-TIME RULES — this is the most important field to get right:
-  • The time field is IN-STORY fiction time. It must NEVER reflect the real-world current date or time.
-  • Always start from the time value shown above and advance it by only the realistic amount depicted in this response (seconds to a few minutes for brief exchanges).
-  • The date must match the story's setting (fantasy era, sci-fi calendar, historical period, etc.), not the real world.
-  • If this is the very first message and no previous time exists, invent a time and date that fits the story's world — do NOT use today's real date or the current clock time.
-  • Only jump hours or days if the narrative explicitly depicts that much time passing.
+TIME RULES — most important field:
+  • IN-STORY fiction time only. NEVER use the real-world current date or clock time.
+  • Advance from the baseline above by the realistic amount the scene depicts (seconds to a few minutes for brief exchanges).
+  • The date must match the story's setting (fantasy era, sci-fi calendar, historical period, etc.).
+  • If no previous time exists, invent one that fits the world — do NOT use today's date.
+  • Only jump hours or days when the exchange explicitly depicts that much time passing.
 
-  Correct examples (fictional — not real dates):
-    Sci-fi:    "9:10 PM; 01/20/31 BBY (Monday)"
+  Correct examples (fictional — not real-world dates):
+    Sci-fi:     "9:10 PM; 01/20/31 BBY (Monday)"
     Historical: "8:10 PM; 10/4/1452 (Monday)"
-    Fantasy:   "11:30 PM; Day 47, Third Age (Friday)"
+    Fantasy:    "11:30 PM; Day 47, Third Age (Friday)"
 
 OTHER FIELD RULES:
-  • Location: Change only if this response shows characters moving somewhere new.
-  • Weather: Change only if the narrative gives a reason for it to change.
-  • Characters: Add or remove only as the scene logically requires.
-  • All other fields: copy the value above unchanged unless this response alters them.
+  • Location: update if the user's message or your response shows characters moving somewhere new.
+  • Weather: update only if the exchange gives a narrative reason.
+  • Characters: add or remove only as the scene requires.
 
 Heart Meter:
   Tracks the CHARACTER's romantic interest in {{user}}. Starts at 0 for every new story. Range: 0–69,999.
-  Only the character's own emotions drive this value — never adjust it based on user actions alone.
+  Only the character's own emotions drive this — never adjust based on user actions alone.
   Current value: ${s.heartPoints}
   THIS RESPONSE: the heart value MUST be between ${Math.max(0, s.heartPoints - maxShift)} and ${Math.min(69999, s.heartPoints + maxShift)}. Any value outside this range is an error.
   🖤 0–4,999   💜 5,000–19,999   💙 20,000–29,999   💚 30,000–39,999
@@ -852,10 +864,16 @@ function onUserMessageRendered(mesId) {
     const s = getSettings();
     if (!s.enabled) return;
 
+    // Re-inject the prompt now that the user's message is in chat — this ensures
+    // the injected prompt includes the user's latest message as tracker context
+    // before the AI begins generating its response.
+    injectPrompt();
+
     if (msg.extra?.tt_tracker) {
         renderMessageTracker(mesId);
     }
-    // No generation here — wait for the AI to respond, then populatePrecedingUserMessages fires
+    // User message trackers are applied retroactively by populatePrecedingUserMessages
+    // once the AI responds — no generation here.
 }
 
 function onChatChanged() {
