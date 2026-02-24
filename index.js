@@ -1014,25 +1014,33 @@ function loadSettingsUi() {
 
             <hr class="tt-divider">
 
-            <div class="tt-setting-row">
-                <span class="tt-setting-label">💘 Default Starting Heart</span>
-                <input type="number" id="tt-default-heart" class="tt-heart-num-input text_pole"
-                       min="0" max="99999" step="1" value="${s.defaultHeartValue || 0}">
+            <div class="inline-drawer tt-heart-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header tt-heart-drawer-header">
+                    <b>💘 Heart Meter</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down"></div>
+                </div>
+                <div class="inline-drawer-content tt-heart-drawer-content">
+                    <div class="tt-setting-row">
+                        <span class="tt-setting-label">Default Starting Heart</span>
+                        <input type="number" id="tt-default-heart" class="tt-heart-num-input text_pole"
+                               min="0" max="99999" step="1" value="${s.defaultHeartValue || 0}">
+                    </div>
+                    <small>Heart value assigned at the start of every new chat.</small>
+
+                    <div class="tt-setting-row">
+                        <span class="tt-setting-label">Heart Sensitivity</span>
+                        <input type="range" id="tt-heart-sensitivity" class="tt-sensitivity-slider"
+                               min="1" max="10" step="1" value="${s.heartSensitivity}">
+                        <span id="tt-heart-sensitivity-val" class="tt-sensitivity-val">${s.heartSensitivity}</span>
+                    </div>
+                    <small id="tt-sensitivity-desc">Max shift per AI response: ±${maxShift} pts &nbsp;(1 = slow → 10 = fast, max ±5,000)</small>
+
+                    <hr class="tt-divider">
+
+                    <div class="tt-colors-header">Heart Color Ranges</div>
+                    ${colorRowsHtml}
+                </div>
             </div>
-            <small>Heart value assigned at the start of every new chat.</small>
-
-            <div class="tt-setting-row">
-                <span class="tt-setting-label">💘 Heart Sensitivity</span>
-                <input type="range" id="tt-heart-sensitivity" class="tt-sensitivity-slider"
-                       min="1" max="10" step="1" value="${s.heartSensitivity}">
-                <span id="tt-heart-sensitivity-val" class="tt-sensitivity-val">${s.heartSensitivity}</span>
-            </div>
-            <small id="tt-sensitivity-desc">Max shift per AI response: ±${maxShift} pts &nbsp;(1 = slow → 10 = fast, max ±5,000)</small>
-
-            <hr class="tt-divider">
-
-            <div class="tt-colors-header">Heart Color Ranges</div>
-            ${colorRowsHtml}
 
             <hr class="tt-divider">
 
