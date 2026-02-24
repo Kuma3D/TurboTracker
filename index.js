@@ -477,11 +477,16 @@ async function regenTracker(mesId) {
     btn.prop('disabled', true).html('<i class="fa-solid fa-rotate fa-spin"></i> Regenerating…');
 
     try {
+        const s        = getSettings();
+        const maxShift = (Number(s.heartSensitivity) || 5) * 500;
+
         const prevMsg = ctx.chat.slice(0, mesId).reverse().find(m => m.extra?.tt_tracker);
         const prevTrackerText = prevMsg
             ? formatTrackerForPrompt(prevMsg.extra.tt_tracker)
             : 'None';
         const prevHeart = parseInt(prevMsg?.extra?.tt_tracker?.heart, 10) || 0;
+        const heartLo   = Math.max(0,     prevHeart - maxShift);
+        const heartHi   = Math.min(69999, prevHeart + maxShift);
 
         let genPrompt;
 
@@ -503,12 +508,13 @@ ${msg.mes}
 time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
 location: Full location description
 weather: Weather description, Temperature
-heart: integer_value
+heart: ${prevHeart}
 characters:
 - name: CharacterName | outfit: Clothing description | state: State | position: Position
 [/TRACKER]`;
         } else {
-            // AI message: infer from conversation context
+            // AI message: infer from conversation context up to (and including) this message only —
+            // do NOT include messages after mesId, as those are "future" context for this point in time.
             const start       = Math.max(0, mesId - 6);
             const contextMsgs = ctx.chat.slice(start, mesId + 1);
             const contextText = contextMsgs
@@ -518,7 +524,8 @@ characters:
             genPrompt =
 `[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
 
-IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance only by a realistic amount for what the scene depicts. If no previous time exists, invent one that fits the story's setting.]
+IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance only by a realistic amount for what the scene depicts. If no previous time exists, invent one that fits the story's setting.
+heart must be between ${heartLo} and ${heartHi} (previous value was ${prevHeart}).]
 
 Previous tracker state:
 ${prevTrackerText}
@@ -529,15 +536,17 @@ ${contextText}
 time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
 location: Full location description
 weather: Weather description, Temperature
-heart: integer_value
+heart: integer_value between ${heartLo} and ${heartHi}
 characters:
 - name: CharacterName | outfit: Clothing description | state: State | position: Position
 [/TRACKER]`;
         }
 
-        // Suppress the "USER'S CURRENT MESSAGE" section during regen so the AI
-        // only considers context up to the message being regenerated, not future messages.
-        injectPrompt(false);
+        // Completely clear the extension prompt before the quiet generation so the AI
+        // only sees the conversation history up to mesId and the explicit genPrompt above.
+        // If we left injectPrompt() active it would supply s.heartPoints (current latest value)
+        // and the current tracker state — causing regen to bleed in future context.
+        setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
         let response;
         try {
             response = await generateQuietPrompt(genPrompt, false, true);
@@ -548,14 +557,15 @@ characters:
 
         const data = parseTrackerBlock(response);
         if (data) {
-            const s = getSettings();
             if (msg.is_user) {
                 // Hard lock heart on user messages
                 data.heart = prevHeart;
             } else {
-                const maxShift = (Number(s.heartSensitivity) || 5) * 500;
                 if (data.heart !== null) {
-                    data.heart = clampHeart(data.heart, s.heartPoints, maxShift);
+                    // Clamp against prevHeart (the historical baseline), NOT s.heartPoints
+                    // (current latest value) — otherwise we'd be constraining relative to
+                    // a future state that didn't exist at the time of this message.
+                    data.heart = clampHeart(data.heart, prevHeart, maxShift);
                     s.heartPoints = data.heart;
                 }
             }
@@ -727,9 +737,11 @@ async function populateAllMessages() {
             return;
         }
 
-        // Suppress the "USER'S CURRENT MESSAGE" section for all quiet generations
-        // inside this loop — each prompt already supplies its own explicit context.
-        injectPrompt(false);
+        // Completely clear the extension prompt for all quiet generations inside this loop.
+        // Each genPrompt below supplies its own explicit context (previous tracker + conversation
+        // excerpt), so the main extension prompt would only add noise — and would supply
+        // s.heartPoints / current tracker state that could contaminate historical generations.
+        setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
 
         const aiMessages = ctx.chat
             .map((msg, idx) => ({ msg, idx }))
@@ -788,10 +800,16 @@ async function populateAllMessages() {
                 ? formatTrackerForPrompt(prevMsg.extra.tt_tracker)
                 : 'None';
 
+            const populateMaxShift = (Number(s.heartSensitivity) || 5) * 500;
+            const populatePrevHeart = parseInt(prevMsg?.extra?.tt_tracker?.heart, 10) || 0;
+            const populateHeartLo   = Math.max(0,     populatePrevHeart - populateMaxShift);
+            const populateHeartHi   = Math.min(69999, populatePrevHeart + populateMaxShift);
+
             const genPrompt =
 `[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
 
-IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance only by a realistic amount for what the scene depicts. If no previous time exists, invent one that fits the story's setting.]
+IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance only by a realistic amount for what the scene depicts. If no previous time exists, invent one that fits the story's setting.
+heart must be between ${populateHeartLo} and ${populateHeartHi} (previous value was ${populatePrevHeart}).]
 
 Previous tracker state:
 ${prevTrackerText}
@@ -802,7 +820,7 @@ ${contextText}
 time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
 location: Full location description
 weather: Weather description, Temperature
-heart: integer_value
+heart: integer_value between ${populateHeartLo} and ${populateHeartHi}
 characters:
 - name: CharacterName | outfit: Clothing description | state: State | position: Position
 [/TRACKER]`;
@@ -811,9 +829,8 @@ characters:
                 const response = await generateQuietPrompt(genPrompt, false, true);
                 const data = parseTrackerBlock(response);
                 if (data) {
-                    const maxShift = (Number(s.heartSensitivity) || 5) * 500;
                     if (data.heart !== null) {
-                        data.heart = clampHeart(data.heart, s.heartPoints, maxShift);
+                        data.heart = clampHeart(data.heart, populatePrevHeart, populateMaxShift);
                         s.heartPoints = data.heart;
                     }
                     msg.extra = msg.extra || {};
