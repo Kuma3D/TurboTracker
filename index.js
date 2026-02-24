@@ -18,18 +18,26 @@ const DEFAULT_SETTINGS = {
     enabled: true,
     heartPoints: 0,
     heartSensitivity: 5,
+    defaultHeartValue: 0,
+    heartColors: [
+        { emoji: '🖤', min: 0,     max: 4999  },
+        { emoji: '💜', min: 5000,  max: 19999 },
+        { emoji: '💙', min: 20000, max: 29999 },
+        { emoji: '💚', min: 30000, max: 39999 },
+        { emoji: '💛', min: 40000, max: 49999 },
+        { emoji: '🧡', min: 50000, max: 59999 },
+        { emoji: '❤️', min: 60000, max: 99999 },
+    ],
 };
 
 // ── Heart meter ───────────────────────────────────────────────
 
 function getHeartEmoji(points) {
-    if (points < 5000)  return '🖤';
-    if (points < 20000) return '💜';
-    if (points < 30000) return '💙';
-    if (points < 40000) return '💚';
-    if (points < 50000) return '💛';
-    if (points < 60000) return '🧡';
-    return '❤️';
+    const colors = getSettings().heartColors;
+    for (const color of colors) {
+        if (points >= color.min && points <= color.max) return color.emoji;
+    }
+    return colors[colors.length - 1].emoji;
 }
 
 /**
@@ -43,7 +51,7 @@ function clampHeart(rawValue, prevHeart, maxShift) {
     const shift = Math.max(1, parseInt(maxShift, 10) || 2500);
     if (isNaN(val)) return prev;
     const lo = Math.max(0,     prev - shift);
-    const hi = Math.min(69999, prev + shift);
+    const hi = Math.min(99999, prev + shift);
     return Math.max(lo, Math.min(hi, val));
 }
 
@@ -324,7 +332,7 @@ function buildEditFormHtml(data, mesId) {
                 <div class="tt-edit-row">
                     <label class="tt-edit-label">💘 Heart</label>
                     <input class="tt-edit-input text_pole tt-edit-heart" id="tt-edit-heart-${mesId}"
-                           type="number" value="${parseInt(data.heart, 10) || 0}" min="0" max="69999">
+                           type="number" value="${parseInt(data.heart, 10) || 0}" min="0" max="99999">
                 </div>
                 <div class="tt-edit-row tt-edit-chars-row">
                     <label class="tt-edit-label">👥 Characters</label>
@@ -347,11 +355,14 @@ function buildEditFormHtml(data, mesId) {
 
 function getSettings() {
     if (!extension_settings[EXT_NAME]) {
-        extension_settings[EXT_NAME] = { ...DEFAULT_SETTINGS };
+        extension_settings[EXT_NAME] = {
+            ...DEFAULT_SETTINGS,
+            heartColors: DEFAULT_SETTINGS.heartColors.map(c => ({ ...c })),
+        };
     }
     for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
         if (extension_settings[EXT_NAME][k] === undefined) {
-            extension_settings[EXT_NAME][k] = v;
+            extension_settings[EXT_NAME][k] = Array.isArray(v) ? v.map(c => ({ ...c })) : v;
         }
     }
     return extension_settings[EXT_NAME];
@@ -486,7 +497,7 @@ async function regenTracker(mesId) {
             : 'None';
         const prevHeart = parseInt(prevMsg?.extra?.tt_tracker?.heart, 10) || 0;
         const heartLo   = Math.max(0,     prevHeart - maxShift);
-        const heartHi   = Math.min(69999, prevHeart + maxShift);
+        const heartHi   = Math.min(99999, prevHeart + maxShift);
 
         let genPrompt;
 
@@ -669,6 +680,13 @@ function injectPrompt(includeLatestUserMsg = true) {
         ? `\nUSER'S CURRENT MESSAGE — read this carefully before updating the tracker. Any scene changes the user describes (movement, time skip, weather mention, etc.) MUST be reflected in your tracker output:\n"${latestUserMsg}"\n`
         : '';
 
+    // Build dynamic color legend from settings
+    const colors = s.heartColors;
+    const colorDesc = colors.map((c, i) => {
+        const maxLabel = i === colors.length - 1 ? `${c.max.toLocaleString()}+` : c.max.toLocaleString();
+        return `${c.emoji} ${c.min.toLocaleString()}–${maxLabel}`;
+    }).join('   ');
+
     const prompt = `[TurboTracker — mandatory instructions]
 At the very end of EVERY response, after all narrative text, append a tracker block in exactly this format:
 
@@ -702,12 +720,11 @@ OTHER FIELD RULES:
   • Characters: add or remove only as the scene requires.
 
 Heart Meter:
-  Tracks the CHARACTER's romantic interest in {{user}}. Starts at 0 for every new story. Range: 0–69,999.
+  Tracks the CHARACTER's romantic interest in {{user}}. Starts at 0 for every new story. Range: 0–99,999.
   Only the character's own emotions drive this — never adjust based on user actions alone.
   Current value: ${s.heartPoints}
-  THIS RESPONSE: the heart value MUST be between ${Math.max(0, s.heartPoints - maxShift)} and ${Math.min(69999, s.heartPoints + maxShift)}. Any value outside this range is an error.
-  🖤 0–4,999   💜 5,000–19,999   💙 20,000–29,999   💚 30,000–39,999
-  💛 40,000–49,999   🧡 50,000–59,999   ❤️ 60,000+
+  THIS RESPONSE: the heart value MUST be between ${Math.max(0, s.heartPoints - maxShift)} and ${Math.min(99999, s.heartPoints + maxShift)}. Any value outside this range is an error.
+  ${colorDesc}
 
 Characters section:
   List every character currently present in the scene.
@@ -803,7 +820,7 @@ async function populateAllMessages() {
             const populateMaxShift = (Number(s.heartSensitivity) || 5) * 500;
             const populatePrevHeart = parseInt(prevMsg?.extra?.tt_tracker?.heart, 10) || 0;
             const populateHeartLo   = Math.max(0,     populatePrevHeart - populateMaxShift);
-            const populateHeartHi   = Math.min(69999, populatePrevHeart + populateMaxShift);
+            const populateHeartHi   = Math.min(99999, populatePrevHeart + populateMaxShift);
 
             const genPrompt =
 `[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
@@ -912,11 +929,10 @@ function onChatChanged() {
     $('.tt-container').remove();
 
     // Sync heartPoints with the most recent tracker in the incoming chat.
-    // This ensures new chats always start at 0 and existing chats restore
-    // their correct value rather than inheriting the previous chat's state.
+    // For new chats with no tracker data, fall back to defaultHeartValue.
     const s = getSettings();
     const ctx = getContext();
-    let latestHeart = 0;
+    let latestHeart = s.defaultHeartValue || 0;
     if (ctx?.chat) {
         for (let i = ctx.chat.length - 1; i >= 0; i--) {
             const h = ctx.chat[i]?.extra?.tt_tracker?.heart;
@@ -972,6 +988,17 @@ function loadSettingsUi() {
     const s = getSettings();
     const maxShift = (Number(s.heartSensitivity) || 5) * 500;
 
+    const colorRowsHtml = s.heartColors.map((c, i) => `
+            <div class="tt-color-row">
+                <span class="tt-color-emoji">${c.emoji}</span>
+                <label class="tt-color-range-label">Min</label>
+                <input type="number" class="tt-color-min text_pole tt-heart-num-input"
+                       data-coloridx="${i}" min="0" max="99999" value="${c.min}">
+                <label class="tt-color-range-label">Max</label>
+                <input type="number" class="tt-color-max text_pole tt-heart-num-input"
+                       data-coloridx="${i}" min="0" max="99999" value="${c.max}">
+            </div>`).join('');
+
     const html = `
 <div class="tt-settings">
     <div class="inline-drawer">
@@ -988,12 +1015,24 @@ function loadSettingsUi() {
             <hr class="tt-divider">
 
             <div class="tt-setting-row">
+                <span class="tt-setting-label">💘 Default Starting Heart</span>
+                <input type="number" id="tt-default-heart" class="tt-heart-num-input text_pole"
+                       min="0" max="99999" step="1" value="${s.defaultHeartValue || 0}">
+            </div>
+            <small>Heart value assigned at the start of every new chat.</small>
+
+            <div class="tt-setting-row">
                 <span class="tt-setting-label">💘 Heart Sensitivity</span>
                 <input type="range" id="tt-heart-sensitivity" class="tt-sensitivity-slider"
                        min="1" max="10" step="1" value="${s.heartSensitivity}">
                 <span id="tt-heart-sensitivity-val" class="tt-sensitivity-val">${s.heartSensitivity}</span>
             </div>
             <small id="tt-sensitivity-desc">Max shift per AI response: ±${maxShift} pts &nbsp;(1 = slow → 10 = fast, max ±5,000)</small>
+
+            <hr class="tt-divider">
+
+            <div class="tt-colors-header">Heart Color Ranges</div>
+            ${colorRowsHtml}
 
             <hr class="tt-divider">
 
@@ -1018,11 +1057,33 @@ function loadSettingsUi() {
         if (!this.checked) $('.tt-container').remove();
     });
 
+    $('#tt-default-heart').on('input', function () {
+        const val = Math.max(0, Math.min(99999, parseInt(this.value) || 0));
+        getSettings().defaultHeartValue = val;
+        saveSettingsDebounced();
+    });
+
     $('#tt-heart-sensitivity').on('input', function () {
         const val = Number(this.value);
         getSettings().heartSensitivity = val;
         $('#tt-heart-sensitivity-val').text(val);
         $('#tt-sensitivity-desc').text(`Max Heart Meter shift per AI response: \u00b1${val * 500} pts \u00a0(1\u2009=\u2009slow \u2192 10\u2009=\u2009fast)`);
+        saveSettingsDebounced();
+        injectPrompt();
+    });
+
+    $('.tt-color-min').on('input', function () {
+        const idx = parseInt($(this).data('coloridx'));
+        const val = Math.max(0, Math.min(99999, parseInt(this.value) || 0));
+        getSettings().heartColors[idx].min = val;
+        saveSettingsDebounced();
+        injectPrompt();
+    });
+
+    $('.tt-color-max').on('input', function () {
+        const idx = parseInt($(this).data('coloridx'));
+        const val = Math.max(0, Math.min(99999, parseInt(this.value) || 0));
+        getSettings().heartColors[idx].max = val;
         saveSettingsDebounced();
         injectPrompt();
     });
