@@ -17,6 +17,7 @@ const EXT_NAME = 'turbo-tracker';
 const DEFAULT_SETTINGS = {
     enabled: true,
     heartPoints: 0,
+    heartSensitivity: 5,
 };
 
 // ── Heart meter ───────────────────────────────────────────────
@@ -29,6 +30,54 @@ function getHeartEmoji(points) {
     if (points < 50000) return '💛';
     if (points < 60000) return '🧡';
     return '❤️';
+}
+
+/**
+ * Clamp a new heart value so it cannot shift more than maxShift from prevHeart.
+ * Enforced in code regardless of what the AI outputs.
+ * All inputs are coerced to safe integers to guard against NaN from bad settings.
+ */
+function clampHeart(rawValue, prevHeart, maxShift) {
+    const val   = parseInt(rawValue,  10);
+    const prev  = parseInt(prevHeart, 10) || 0;
+    const shift = Math.max(1, parseInt(maxShift, 10) || 2500);
+    if (isNaN(val)) return prev;
+    const lo = Math.max(0,     prev - shift);
+    const hi = Math.min(69999, prev + shift);
+    return Math.max(lo, Math.min(hi, val));
+}
+
+/**
+ * Advance the H:MM AM/PM portion of a tracker time string by the given minutes.
+ * Leaves the date/era suffix (e.g. "; 01/20/31 BBY (Monday)") unchanged.
+ * If the format isn't recognised, the original string is returned unmodified.
+ */
+function advanceTimeString(timeStr, minutes) {
+    if (!timeStr) return timeStr;
+    const m = timeStr.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)(.*)/i);
+    if (!m) return timeStr;
+
+    let hours = parseInt(m[1], 10);
+    let mins  = parseInt(m[2], 10);
+    const period = m[3].toUpperCase();
+    const rest   = m[4]; // everything after "AM/PM" (date, era, etc.)
+
+    // Convert to 24-hour
+    if (period === 'PM' && hours !== 12) hours += 12;
+    if (period === 'AM' && hours === 12) hours  = 0;
+
+    // Advance
+    mins  += minutes;
+    hours += Math.floor(mins / 60);
+    mins   = mins  % 60;
+    hours  = hours % 24;
+
+    // Convert back to 12-hour
+    const newPeriod = hours >= 12 ? 'PM' : 'AM';
+    let   newHours  = hours % 12;
+    if (newHours === 0) newHours = 12;
+
+    return `${newHours}:${String(mins).padStart(2, '0')} ${newPeriod}${rest}`;
 }
 
 // ── Tag parsing ───────────────────────────────────────────────
@@ -90,9 +139,6 @@ function parseTrackerBlock(text) {
 
 /**
  * Convert a SillyTavern-Tracker data object to our tt_tracker format.
- * ST-Tracker stores data on msg.tracker with PascalCase field names:
- *   Time, Location, Weather, CharactersPresent (array), Characters (object by name)
- *   Each character has: Outfit, StateOfDress, PostureAndInteraction, Hair, Makeup
  */
 function convertSTTrackerToTT(stData) {
     if (!stData || typeof stData !== 'object') return null;
@@ -119,8 +165,8 @@ function convertSTTrackerToTT(stData) {
         const d = charDetails[String(name)] || {};
         result.characters.push({
             name:     String(name),
-            outfit:   d.Outfit             || d.outfit   || '',
-            state:    d.StateOfDress       || d.State    || d.state    || '',
+            outfit:   d.Outfit               || d.outfit   || '',
+            state:    d.StateOfDress         || d.State    || d.state    || '',
             position: d.PostureAndInteraction || d.Position || d.position || '',
         });
     }
@@ -133,8 +179,6 @@ function convertSTTrackerToTT(stData) {
 
 /**
  * Try to import tracker data from SillyTavern-Tracker format.
- * Checks msg.tracker (stored object) then <tracker>JSON</tracker> in message text.
- * Returns converted tt_tracker data or null.
  */
 function tryImportSTTracker(msg) {
     if (msg.tracker && typeof msg.tracker === 'object' && Object.keys(msg.tracker).length > 0) {
@@ -162,6 +206,21 @@ function getMostRecentTracker(chat, beforeMesId) {
     return null;
 }
 
+/**
+ * Format a tt_tracker object as plain text for use in AI prompts.
+ */
+function formatTrackerForPrompt(data) {
+    if (!data) return 'None';
+    let text = `time: ${data.time || 'Unknown'}\nlocation: ${data.location || 'Unknown'}\nweather: ${data.weather || 'Unknown'}\nheart: ${parseInt(data.heart, 10) || 0}`;
+    if (data.characters && data.characters.length > 0) {
+        text += '\ncharacters:';
+        for (const c of data.characters) {
+            text += `\n- name: ${c.name} | outfit: ${c.outfit} | state: ${c.state} | position: ${c.position}`;
+        }
+    }
+    return text;
+}
+
 // ── HTML helpers ──────────────────────────────────────────────
 
 function esc(text) {
@@ -175,22 +234,11 @@ function esc(text) {
 
 /**
  * Build the full tracker UI for a message.
- *
- * Layout:
- *   [tt-container]
- *     [tt-always]  ← Time, Location, Weather, Heart — always visible
- *     <details.tt-block> ← 👁️ Tracker — collapsible
- *       Characters Present: Name1, Name2 (header)
- *       Character cards (always visible inside dropdown)
- *       Regenerate / Edit buttons (Regenerate omitted on user messages)
- *     </details>
- *   [/tt-container]
  */
 function buildTrackerHtml(data, mesId, isUser = false) {
     const heartPts   = parseInt(data.heart, 10) || 0;
     const heartEmoji = getHeartEmoji(heartPts);
 
-    // Characters section — no sub-dropdown, directly visible inside Tracker
     let charsHtml = '';
     if (data.characters && data.characters.length > 0) {
         const nameList = data.characters.map(c => esc(c.name)).join(', ');
@@ -207,8 +255,8 @@ function buildTrackerHtml(data, mesId, isUser = false) {
             <div class="tt-chars-list">${cards}</div>`;
     }
 
-    const regenBtn = isUser ? '' : `
-                        <button class="tt-regen-btn menu_button menu_button_icon" data-mesid="${mesId}">
+    const regenBtn = `
+                        <button class="tt-regen-btn menu_button menu_button_icon" data-mesid="${mesId}" data-isuser="${isUser}">
                             <i class="fa-solid fa-rotate"></i> Regenerate Tracker
                         </button>`;
 
@@ -248,8 +296,7 @@ function buildTrackerHtml(data, mesId, isUser = false) {
 }
 
 /**
- * Build the inline edit form that replaces the tracker container.
- * Characters are presented as one pipe-separated line each for easy editing.
+ * Build the inline edit form.
  */
 function buildEditFormHtml(data, mesId) {
     const charsText = (data.characters || [])
@@ -314,15 +361,11 @@ function getSettings() {
 
 /**
  * Inject (or refresh) the tracker UI for a single message.
- * Works for both user and AI messages.
- * Tracker is placed BEFORE .mes_text so it appears at the top of the message.
- * Also strips the raw [TRACKER]...[/TRACKER] block from AI message display text.
  */
 function renderMessageTracker(mesId) {
     const el = $(`.mes[mesid="${mesId}"]`);
     if (!el.length) return;
 
-    // Always remove any existing tracker container first
     el.find('.tt-container').remove();
 
     const s = getSettings();
@@ -334,7 +377,7 @@ function renderMessageTracker(mesId) {
 
     const mesText = el.find('.mes_text');
 
-    // Strip raw tracker tags from AI message display (user messages won't have them)
+    // Strip any lingering [TRACKER] block from the displayed HTML (AI messages only)
     if (!msg.is_user) {
         mesText.html(
             mesText.html().replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim()
@@ -345,8 +388,39 @@ function renderMessageTracker(mesId) {
 }
 
 /**
- * Parse tracker data from an AI message, store it, update the display.
- * Also tries to import from SillyTavern-Tracker format as a fallback.
+ * After storing a tracker on an AI message, retroactively apply the pre-exchange
+ * tracker state to any preceding user messages that don't have one yet.
+ * This ensures user messages get their tracker only after the AI has responded.
+ */
+function populatePrecedingUserMessages(aiMesId) {
+    const ctx = getContext();
+    let modified = false;
+
+    for (let i = aiMesId - 1; i >= 0; i--) {
+        const msg = ctx.chat[i];
+        if (!msg || !msg.is_user) break; // Stop at the previous AI message
+        if (msg.extra?.tt_tracker) continue; // Already has one
+
+        // The tracker for a user message is whatever was current before they sent their message,
+        // with time advanced by 1–3 minutes so every message has a unique, forward-moving timestamp.
+        const tracker = getMostRecentTracker(ctx.chat, i);
+        if (tracker) {
+            const advancedTracker = { ...tracker };
+            const nudge = 1 + Math.floor(Math.random() * 3); // 1–3 minutes
+            advancedTracker.time = advanceTimeString(tracker.time, nudge);
+            msg.extra = msg.extra || {};
+            msg.extra.tt_tracker = advancedTracker;
+            renderMessageTracker(i);
+            modified = true;
+        }
+    }
+
+    if (modified) ctx.saveChat();
+}
+
+/**
+ * Parse tracker data from an AI message, clamp the heart value, strip the
+ * block from msg.mes permanently, store in extra, and update the display.
  */
 function processMessage(mesId) {
     const s = getSettings();
@@ -356,18 +430,25 @@ function processMessage(mesId) {
     const msg = ctx.chat[mesId];
     if (!msg || msg.is_user) return;
 
-    // 1. Try our own [TRACKER] format first
+    // 1. Try our own [TRACKER] format
     const data = parseTrackerBlock(msg.mes || '');
     if (data) {
+        // Enforce heart shift limit in code — don't trust the AI to respect it
+        const maxShift = (Number(s.heartSensitivity) || 5) * 500;
         if (data.heart !== null) {
-            const pts = parseInt(data.heart, 10);
-            if (!isNaN(pts)) s.heartPoints = Math.max(0, pts);
+            data.heart = clampHeart(data.heart, s.heartPoints, maxShift);
+            s.heartPoints = data.heart;
         }
+
+        // Permanently strip the tracker block from msg.mes so it never renders again
+        msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
+
         msg.extra = msg.extra || {};
         msg.extra.tt_tracker = data;
-        getContext().saveChat();
+        ctx.saveChat();
         saveSettingsDebounced();
         renderMessageTracker(mesId);
+        populatePrecedingUserMessages(mesId);
         injectPrompt();
         return;
     }
@@ -377,9 +458,10 @@ function processMessage(mesId) {
     if (imported) {
         msg.extra = msg.extra || {};
         msg.extra.tt_tracker = imported;
-        getContext().saveChat();
+        ctx.saveChat();
         saveSettingsDebounced();
         renderMessageTracker(mesId);
+        populatePrecedingUserMessages(mesId);
         injectPrompt();
     }
 }
@@ -389,20 +471,64 @@ function processMessage(mesId) {
 async function regenTracker(mesId) {
     const ctx = getContext();
     const msg = ctx.chat[mesId];
-    if (!msg || msg.is_user) return;
+    if (!msg) return;
 
     const btn = $(`.mes[mesid="${mesId}"] .tt-regen-btn`);
     btn.prop('disabled', true).html('<i class="fa-solid fa-rotate fa-spin"></i> Regenerating…');
 
     try {
-        const start       = Math.max(0, mesId - 6);
-        const contextMsgs = ctx.chat.slice(start, mesId + 1);
-        const contextText = contextMsgs
-            .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
-            .join('\n\n');
+        const s        = getSettings();
+        const maxShift = (Number(s.heartSensitivity) || 5) * 500;
 
-        const genPrompt =
-`[OOC: Based only on the conversation excerpt below, infer the tracker state at the moment of the last message. Output ONLY the tracker block — no other text.]
+        const prevMsg = ctx.chat.slice(0, mesId).reverse().find(m => m.extra?.tt_tracker);
+        const prevTrackerText = prevMsg
+            ? formatTrackerForPrompt(prevMsg.extra.tt_tracker)
+            : 'None';
+        const prevHeart = parseInt(prevMsg?.extra?.tt_tracker?.heart, 10) || 0;
+        const heartLo   = Math.max(0,     prevHeart - maxShift);
+        const heartHi   = Math.min(69999, prevHeart + maxShift);
+
+        let genPrompt;
+
+        if (msg.is_user) {
+            // User message: infer scene changes from the user's text; lock heart to previous value
+            genPrompt =
+`[OOC: Based on the user's message below and the previous tracker state, produce an updated tracker reflecting any scene changes the user's message logically implies. Output ONLY the tracker block — no other text.
+
+IMPORTANT: The time field is in-story fiction time, NOT real-world time. Advance only by a realistic amount for what the message depicts.
+heart must remain exactly ${prevHeart} — only the character's emotions change this, never the user.]
+
+Previous tracker state:
+${prevTrackerText}
+
+User's message:
+${msg.mes}
+
+[TRACKER]
+time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
+location: Full location description
+weather: Weather description, Temperature
+heart: ${prevHeart}
+characters:
+- name: CharacterName | outfit: Clothing description | state: State | position: Position
+[/TRACKER]`;
+        } else {
+            // AI message: infer from conversation context up to (and including) this message only —
+            // do NOT include messages after mesId, as those are "future" context for this point in time.
+            const start       = Math.max(0, mesId - 6);
+            const contextMsgs = ctx.chat.slice(start, mesId + 1);
+            const contextText = contextMsgs
+                .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
+                .join('\n\n');
+
+            genPrompt =
+`[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
+
+IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance only by a realistic amount for what the scene depicts. If no previous time exists, invent one that fits the story's setting.
+heart must be between ${heartLo} and ${heartHi} (previous value was ${prevHeart}).]
+
+Previous tracker state:
+${prevTrackerText}
 
 ${contextText}
 
@@ -410,27 +536,48 @@ ${contextText}
 time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
 location: Full location description
 weather: Weather description, Temperature
-heart: integer_value
+heart: integer_value between ${heartLo} and ${heartHi}
 characters:
 - name: CharacterName | outfit: Clothing description | state: State | position: Position
 [/TRACKER]`;
+        }
 
-        const response = await generateQuietPrompt(genPrompt, false, true);
+        // Completely clear the extension prompt before the quiet generation so the AI
+        // only sees the conversation history up to mesId and the explicit genPrompt above.
+        // If we left injectPrompt() active it would supply s.heartPoints (current latest value)
+        // and the current tracker state — causing regen to bleed in future context.
+        setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
+        let response;
+        try {
+            response = await generateQuietPrompt(genPrompt, false, true);
+        } finally {
+            // Always restore the full prompt regardless of outcome
+            injectPrompt(true);
+        }
+
         const data = parseTrackerBlock(response);
         if (data) {
+            if (msg.is_user) {
+                // Hard lock heart on user messages
+                data.heart = prevHeart;
+            } else {
+                if (data.heart !== null) {
+                    // Clamp against prevHeart (the historical baseline), NOT s.heartPoints
+                    // (current latest value) — otherwise we'd be constraining relative to
+                    // a future state that didn't exist at the time of this message.
+                    data.heart = clampHeart(data.heart, prevHeart, maxShift);
+                    s.heartPoints = data.heart;
+                }
+            }
             msg.extra = msg.extra || {};
             msg.extra.tt_tracker = data;
-            if (data.heart !== null) {
-                const pts = parseInt(data.heart, 10);
-                if (!isNaN(pts)) getSettings().heartPoints = Math.max(0, pts);
-            }
             await ctx.saveChat();
             saveSettingsDebounced();
             renderMessageTracker(mesId);
-            injectPrompt();
         }
     } catch (err) {
         console.warn(`[TurboTracker] Regen failed for message #${mesId}:`, err);
+        injectPrompt(true); // ensure prompt is restored on error too
         btn.prop('disabled', false).html('<i class="fa-solid fa-rotate"></i> Regenerate Tracker');
     }
 }
@@ -489,37 +636,83 @@ function saveEditedTracker(mesId) {
 
 // ── Prompt injection ──────────────────────────────────────────
 
-function injectPrompt() {
+function injectPrompt(includeLatestUserMsg = true) {
     const s = getSettings();
     if (!s.enabled) {
         setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
         return;
     }
 
+    const maxShift = (Number(s.heartSensitivity) || 5) * 500;
+
+    const ctx  = getContext();
+    const chat = ctx?.chat || [];
+
+    // Most recent tracker — concrete starting point for all fields
+    let currentTrackerText = 'No previous tracker yet — this is the start of the story.';
+    for (let i = chat.length - 1; i >= 0; i--) {
+        if (chat[i]?.extra?.tt_tracker) {
+            currentTrackerText = formatTrackerForPrompt(chat[i].extra.tt_tracker);
+            break;
+        }
+    }
+
+    // Most recent user message — used to tell the AI what scene changes to reflect
+    let latestUserMsg = '';
+    for (let i = chat.length - 1; i >= 0; i--) {
+        if (chat[i]?.is_user && chat[i].mes) {
+            latestUserMsg = chat[i].mes.slice(0, 800);
+            break;
+        }
+    }
+    const userMsgSection = (includeLatestUserMsg && latestUserMsg)
+        ? `\nUSER'S CURRENT MESSAGE — read this carefully before updating the tracker. Any scene changes the user describes (movement, time skip, weather mention, etc.) MUST be reflected in your tracker output:\n"${latestUserMsg}"\n`
+        : '';
+
     const prompt = `[TurboTracker — mandatory instructions]
-At the very end of EVERY response, after all narrative text, append a tracker block using exactly this format:
+At the very end of EVERY response, after all narrative text, append a tracker block in exactly this format:
 
 [TRACKER]
-time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
+time: h:MM AM/PM; story-appropriate date (DayOfWeek)
 location: Full location description
-weather: Weather description, Temperature
+weather: Weather condition, Temperature
 heart: integer_value
 characters:
 - name: CharacterName | outfit: Clothing description | state: Emotional/physical state | position: Where in the scene
 [/TRACKER]
+${userMsgSection}
+PREVIOUS TRACKER STATE — your baseline. Update each field that the current exchange (user message + your response) requires; copy everything else forward exactly:
+${currentTrackerText}
 
-Heart Meter (current value: ${s.heartPoints}):
-  Tracks the main character's romantic interest in {{user}}. Range: 0–69,999.
-  Maximum shift per response: 10,000 points.
+TIME RULES — most important field:
+  • IN-STORY fiction time only. NEVER use the real-world current date or clock time.
+  • Advance from the baseline above by the realistic amount the scene depicts (seconds to a few minutes for brief exchanges).
+  • The date must match the story's setting (fantasy era, sci-fi calendar, historical period, etc.).
+  • If no previous time exists, invent one that fits the world — do NOT use today's date.
+  • Only jump hours or days when the exchange explicitly depicts that much time passing.
+
+  Correct examples (fictional — not real-world dates):
+    Sci-fi:     "9:10 PM; 01/20/31 BBY (Monday)"
+    Historical: "8:10 PM; 10/4/1452 (Monday)"
+    Fantasy:    "11:30 PM; Day 47, Third Age (Friday)"
+
+OTHER FIELD RULES:
+  • Location: update if the user's message or your response shows characters moving somewhere new.
+  • Weather: update only if the exchange gives a narrative reason.
+  • Characters: add or remove only as the scene requires.
+
+Heart Meter:
+  Tracks the CHARACTER's romantic interest in {{user}}. Starts at 0 for every new story. Range: 0–69,999.
+  Only the character's own emotions drive this — never adjust based on user actions alone.
+  Current value: ${s.heartPoints}
+  THIS RESPONSE: the heart value MUST be between ${Math.max(0, s.heartPoints - maxShift)} and ${Math.min(69999, s.heartPoints + maxShift)}. Any value outside this range is an error.
   🖤 0–4,999   💜 5,000–19,999   💙 20,000–29,999   💚 30,000–39,999
   💛 40,000–49,999   🧡 50,000–59,999   ❤️ 60,000+
 
 Characters section:
   List every character currently present in the scene.
   Each line must use the pipe-separated format shown above.
-  Include current outfit, emotional/physical state, and position in the scene.
-
-Update only values that have changed from the previous block. Never omit the block.`;
+  Include current outfit, emotional/physical state, and position in the scene.`;
 
     setExtensionPrompt(EXT_NAME, prompt, extension_prompt_types.BEFORE_PROMPT, 0);
 }
@@ -544,6 +737,12 @@ async function populateAllMessages() {
             return;
         }
 
+        // Completely clear the extension prompt for all quiet generations inside this loop.
+        // Each genPrompt below supplies its own explicit context (previous tracker + conversation
+        // excerpt), so the main extension prompt would only add noise — and would supply
+        // s.heartPoints / current tracker state that could contaminate historical generations.
+        setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
+
         const aiMessages = ctx.chat
             .map((msg, idx) => ({ msg, idx }))
             .filter(({ msg }) => !msg.is_user);
@@ -552,17 +751,25 @@ async function populateAllMessages() {
         status.text(`0 / ${aiMessages.length} messages…`);
 
         for (const { msg, idx } of aiMessages) {
-            // Already have stored tracker data — just re-render
             if (msg.extra?.tt_tracker) {
+                // Already has tracker — strip any leftover [TRACKER] text from msg.mes
+                if ((msg.mes || '').match(/\[TRACKER\]/i)) {
+                    msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
+                }
                 renderMessageTracker(idx);
                 done++;
                 status.text(`${done} / ${aiMessages.length} messages…`);
                 continue;
             }
 
-            // Tags already embedded in text — parse them now
             const existing = parseTrackerBlock(msg.mes || '');
             if (existing) {
+                const maxShift = (Number(s.heartSensitivity) || 5) * 500;
+                if (existing.heart !== null) {
+                    existing.heart = clampHeart(existing.heart, s.heartPoints, maxShift);
+                    s.heartPoints = existing.heart;
+                }
+                msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
                 msg.extra = msg.extra || {};
                 msg.extra.tt_tracker = existing;
                 renderMessageTracker(idx);
@@ -571,7 +778,6 @@ async function populateAllMessages() {
                 continue;
             }
 
-            // Try importing from ST-Tracker format
             const imported = tryImportSTTracker(msg);
             if (imported) {
                 msg.extra = msg.extra || {};
@@ -582,15 +788,31 @@ async function populateAllMessages() {
                 continue;
             }
 
-            // Ask the AI to infer tracker values from chat context
+            // Ask the AI — include previous tracker as reference
             const start       = Math.max(0, idx - 6);
             const contextMsgs = ctx.chat.slice(start, idx + 1);
             const contextText = contextMsgs
                 .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
                 .join('\n\n');
 
+            const prevMsg = ctx.chat.slice(0, idx).reverse().find(m => m.extra?.tt_tracker);
+            const prevTrackerText = prevMsg
+                ? formatTrackerForPrompt(prevMsg.extra.tt_tracker)
+                : 'None';
+
+            const populateMaxShift = (Number(s.heartSensitivity) || 5) * 500;
+            const populatePrevHeart = parseInt(prevMsg?.extra?.tt_tracker?.heart, 10) || 0;
+            const populateHeartLo   = Math.max(0,     populatePrevHeart - populateMaxShift);
+            const populateHeartHi   = Math.min(69999, populatePrevHeart + populateMaxShift);
+
             const genPrompt =
-`[OOC: Based only on the conversation excerpt below, infer the tracker state at the moment of the last message. Output ONLY the tracker block — no other text.]
+`[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
+
+IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance only by a realistic amount for what the scene depicts. If no previous time exists, invent one that fits the story's setting.
+heart must be between ${populateHeartLo} and ${populateHeartHi} (previous value was ${populatePrevHeart}).]
+
+Previous tracker state:
+${prevTrackerText}
 
 ${contextText}
 
@@ -598,7 +820,7 @@ ${contextText}
 time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
 location: Full location description
 weather: Weather description, Temperature
-heart: integer_value
+heart: integer_value between ${populateHeartLo} and ${populateHeartHi}
 characters:
 - name: CharacterName | outfit: Clothing description | state: State | position: Position
 [/TRACKER]`;
@@ -607,13 +829,13 @@ characters:
                 const response = await generateQuietPrompt(genPrompt, false, true);
                 const data = parseTrackerBlock(response);
                 if (data) {
+                    if (data.heart !== null) {
+                        data.heart = clampHeart(data.heart, populatePrevHeart, populateMaxShift);
+                        s.heartPoints = data.heart;
+                    }
                     msg.extra = msg.extra || {};
                     msg.extra.tt_tracker = data;
                     renderMessageTracker(idx);
-                    if (data.heart !== null) {
-                        const pts = parseInt(data.heart, 10);
-                        if (!isNaN(pts)) s.heartPoints = Math.max(0, pts);
-                    }
                 }
             } catch (err) {
                 console.warn(`[TurboTracker] Could not generate tracker for message #${idx}:`, err);
@@ -623,7 +845,7 @@ characters:
             status.text(`${done} / ${aiMessages.length} messages…`);
         }
 
-        // Auto-populate user messages by inheriting from adjacent AI trackers
+        // Apply inherited trackers to user messages that still have none
         ctx.chat.forEach((msg, idx) => {
             if (msg.is_user && !msg.extra?.tt_tracker) {
                 const inherited = getMostRecentTracker(ctx.chat, idx);
@@ -635,7 +857,7 @@ characters:
             }
         });
 
-        await getContext().saveChat();
+        await ctx.saveChat();
         saveSettingsDebounced();
         status.text('Done!');
         setTimeout(() => status.text(''), 3000);
@@ -643,6 +865,7 @@ characters:
     } finally {
         isPopulating = false;
         btn.prop('disabled', false);
+        injectPrompt(true); // restore full prompt when done
     }
 }
 
@@ -661,9 +884,9 @@ function onCharacterMessageRendered(mesId) {
 }
 
 /**
- * Fires when a user message is rendered (on chat load or new message sent).
- * Attaches tracker data to the user message if not already present,
- * inheriting from the most recent prior tracker in the chat.
+ * Fires when a user message is rendered.
+ * Only renders existing tracker data — user message trackers are applied
+ * retroactively by processMessage() after the AI responds.
  */
 function onUserMessageRendered(mesId) {
     const ctx = getContext();
@@ -673,31 +896,53 @@ function onUserMessageRendered(mesId) {
     const s = getSettings();
     if (!s.enabled) return;
 
+    // Re-inject the prompt now that the user's message is in chat — this ensures
+    // the injected prompt includes the user's latest message as tracker context
+    // before the AI begins generating its response.
+    injectPrompt();
+
     if (msg.extra?.tt_tracker) {
         renderMessageTracker(mesId);
-        return;
     }
-
-    // Inherit the current tracker state from the most recent prior message
-    const inherited = getMostRecentTracker(ctx.chat, mesId);
-    if (!inherited) return;
-
-    msg.extra = msg.extra || {};
-    msg.extra.tt_tracker = { ...inherited };
-    ctx.saveChat();
-    renderMessageTracker(mesId);
+    // User message trackers are applied retroactively by populatePrecedingUserMessages
+    // once the AI responds — no generation here.
 }
 
 function onChatChanged() {
     $('.tt-container').remove();
+
+    // Sync heartPoints with the most recent tracker in the incoming chat.
+    // This ensures new chats always start at 0 and existing chats restore
+    // their correct value rather than inheriting the previous chat's state.
+    const s = getSettings();
+    const ctx = getContext();
+    let latestHeart = 0;
+    if (ctx?.chat) {
+        for (let i = ctx.chat.length - 1; i >= 0; i--) {
+            const h = ctx.chat[i]?.extra?.tt_tracker?.heart;
+            if (h != null) { latestHeart = parseInt(h, 10) || 0; break; }
+        }
+    }
+    s.heartPoints = latestHeart;
+    saveSettingsDebounced();
+
     injectPrompt();
 
-    // Re-render all messages that already have tracker data
-    const ctx = getContext();
-    if (!ctx.chat) return;
+    if (!ctx?.chat) return;
+
+    let modified = false;
     ctx.chat.forEach((msg, idx) => {
-        if (msg.extra?.tt_tracker) renderMessageTracker(idx);
+        if (msg.extra?.tt_tracker) {
+            // Clean up any lingering [TRACKER] text in msg.mes
+            if (!msg.is_user && (msg.mes || '').match(/\[TRACKER\]/i)) {
+                msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
+                modified = true;
+            }
+            renderMessageTracker(idx);
+        }
     });
+
+    if (modified) ctx.saveChat();
 }
 
 function onMessageEdited(mesId) {
@@ -706,7 +951,6 @@ function onMessageEdited(mesId) {
     if (!msg) return;
 
     if (msg.is_user) {
-        // For user messages, just re-render existing tracker if any
         if (msg.extra?.tt_tracker) renderMessageTracker(mesId);
         return;
     }
@@ -726,6 +970,7 @@ function onMessageDeleted() {
 
 function loadSettingsUi() {
     const s = getSettings();
+    const maxShift = (Number(s.heartSensitivity) || 5) * 500;
 
     const html = `
 <div class="tt-settings">
@@ -739,6 +984,16 @@ function loadSettingsUi() {
                 <input type="checkbox" id="tt-enabled" ${s.enabled ? 'checked' : ''}>
                 <span>Enable TurboTracker</span>
             </label>
+
+            <hr class="tt-divider">
+
+            <div class="tt-setting-row">
+                <span class="tt-setting-label">💘 Heart Sensitivity</span>
+                <input type="range" id="tt-heart-sensitivity" class="tt-sensitivity-slider"
+                       min="1" max="10" step="1" value="${s.heartSensitivity}">
+                <span id="tt-heart-sensitivity-val" class="tt-sensitivity-val">${s.heartSensitivity}</span>
+            </div>
+            <small id="tt-sensitivity-desc">Max shift per AI response: ±${maxShift} pts &nbsp;(1 = slow → 10 = fast, max ±5,000)</small>
 
             <hr class="tt-divider">
 
@@ -763,6 +1018,15 @@ function loadSettingsUi() {
         if (!this.checked) $('.tt-container').remove();
     });
 
+    $('#tt-heart-sensitivity').on('input', function () {
+        const val = Number(this.value);
+        getSettings().heartSensitivity = val;
+        $('#tt-heart-sensitivity-val').text(val);
+        $('#tt-sensitivity-desc').text(`Max Heart Meter shift per AI response: \u00b1${val * 500} pts \u00a0(1\u2009=\u2009slow \u2192 10\u2009=\u2009fast)`);
+        saveSettingsDebounced();
+        injectPrompt();
+    });
+
     $('#tt-populate-btn').on('click', populateAllMessages);
 }
 
@@ -777,7 +1041,6 @@ jQuery(async () => {
     eventSource.on(event_types.MESSAGE_EDITED,             onMessageEdited);
     eventSource.on(event_types.MESSAGE_DELETED,            onMessageDeleted);
 
-    // Event delegation for dynamically-created tracker buttons
     $(document).on('click', '.tt-regen-btn', async function () {
         const mesId = parseInt($(this).data('mesid'));
         await regenTracker(mesId);
