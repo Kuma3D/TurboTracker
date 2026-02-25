@@ -949,17 +949,59 @@ characters:
             status.text(`${done} / ${aiMessages.length} messages…`);
         }
 
-        // Apply inherited trackers to user messages that still have none
-        ctx.chat.forEach((msg, idx) => {
-            if (msg.is_user && !msg.extra?.tt_tracker) {
-                const inherited = getMostRecentTracker(ctx.chat, idx);
+        // Handle user messages: inherit tracker if none, fill blank fields if partial
+        for (let i = 0; i < ctx.chat.length; i++) {
+            const umsg = ctx.chat[i];
+            if (!umsg.is_user) continue;
+
+            if (!umsg.extra?.tt_tracker) {
+                const inherited = getMostRecentTracker(ctx.chat, i);
                 if (inherited) {
-                    msg.extra = msg.extra || {};
-                    msg.extra.tt_tracker = { ...inherited };
-                    renderMessageTracker(idx);
+                    umsg.extra = umsg.extra || {};
+                    umsg.extra.tt_tracker = { ...inherited };
+                    renderMessageTracker(i);
+                }
+                continue;
+            }
+
+            if (hasBlankFields(umsg.extra.tt_tracker)) {
+                const start       = Math.max(0, i - 6);
+                const contextMsgs = ctx.chat.slice(start, i + 1);
+                const contextText = contextMsgs
+                    .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
+                    .join('\n\n');
+                const lockedHeart = parseInt(umsg.extra.tt_tracker.heart, 10) || 0;
+
+                const fillPrompt =
+`[OOC: The tracker below has blank fields marked as ???. Based on the conversation excerpt and character context, fill in ONLY the ??? fields. Do not change any field that already has a value. Output ONLY a complete tracker block — no other text.]
+
+Current tracker (fill in the ??? fields):
+${formatTrackerWithBlanks(umsg.extra.tt_tracker)}
+
+${contextText}
+
+[TRACKER]
+time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
+location: Full location description
+weather: Weather description, Temperature
+heart: ${lockedHeart}
+characters:
+- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
+[/TRACKER]`;
+
+                try {
+                    const response = await generateQuietPrompt(fillPrompt, false, true);
+                    const filled = parseTrackerBlock(response);
+                    if (filled) {
+                        umsg.extra.tt_tracker = mergeTrackers(umsg.extra.tt_tracker, filled);
+                    }
+                } catch (err) {
+                    console.warn(`[TurboTracker] Could not fill blank fields for user message #${i}:`, err);
                 }
             }
-        });
+
+            renderMessageTracker(i);
+        }
 
         await ctx.saveChat();
         saveSettingsDebounced();
