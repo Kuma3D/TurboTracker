@@ -739,6 +739,49 @@ Characters section:
     setExtensionPrompt(EXT_NAME, prompt, extension_prompt_types.BEFORE_PROMPT, 0);
 }
 
+// ── Blank-field helpers ───────────────────────────────────────
+
+const isBlankValue = v => v == null || String(v).trim() === '' || String(v).trim().toLowerCase() === 'unknown';
+
+function hasBlankFields(tracker) {
+    if (isBlankValue(tracker.time) || isBlankValue(tracker.location) || isBlankValue(tracker.weather)) return true;
+    for (const c of (tracker.characters || [])) {
+        if (!c.description || !c.outfit || !c.state || !c.position) return true;
+    }
+    return false;
+}
+
+function formatTrackerWithBlanks(tracker) {
+    const mark = v => isBlankValue(v) ? '???' : v;
+    let text = `time: ${mark(tracker.time)}\nlocation: ${mark(tracker.location)}\nweather: ${mark(tracker.weather)}\nheart: ${parseInt(tracker.heart, 10) || 0}`;
+    if (tracker.characters && tracker.characters.length > 0) {
+        text += '\ncharacters:';
+        for (const c of tracker.characters) {
+            text += `\n- name: ${c.name} | description: ${mark(c.description)} | outfit: ${mark(c.outfit)} | state: ${mark(c.state)} | position: ${mark(c.position)}`;
+        }
+    }
+    return text;
+}
+
+function mergeTrackers(existing, filled) {
+    return {
+        time:       isBlankValue(existing.time)     && filled.time     ? filled.time     : existing.time,
+        location:   isBlankValue(existing.location) && filled.location ? filled.location : existing.location,
+        weather:    isBlankValue(existing.weather)  && filled.weather  ? filled.weather  : existing.weather,
+        heart:      existing.heart, // never overwrite heart retroactively
+        characters: (existing.characters || []).map(ec => {
+            const fc = (filled.characters || []).find(c => c.name === ec.name) || {};
+            return {
+                name:        ec.name,
+                description: ec.description || fc.description || '',
+                outfit:      ec.outfit      || fc.outfit      || '',
+                state:       ec.state       || fc.state       || '',
+                position:    ec.position    || fc.position    || '',
+            };
+        }),
+    };
+}
+
 // ── Retroactive population ────────────────────────────────────
 
 let isPopulating = false;
@@ -774,10 +817,49 @@ async function populateAllMessages() {
 
         for (const { msg, idx } of aiMessages) {
             if (msg.extra?.tt_tracker) {
-                // Already has tracker — strip any leftover [TRACKER] text from msg.mes
+                // Strip any leftover [TRACKER] text from msg.mes
                 if ((msg.mes || '').match(/\[TRACKER\]/i)) {
                     msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
                 }
+
+                if (hasBlankFields(msg.extra.tt_tracker)) {
+                    // Fill in blank fields via AI
+                    const start       = Math.max(0, idx - 6);
+                    const contextMsgs = ctx.chat.slice(start, idx + 1);
+                    const contextText = contextMsgs
+                        .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
+                        .join('\n\n');
+
+                    const lockedHeart = parseInt(msg.extra.tt_tracker.heart, 10) || 0;
+
+                    const fillPrompt =
+`[OOC: The tracker below has blank fields marked as ???. Based on the conversation excerpt and character context, fill in ONLY the ??? fields. Do not change any field that already has a value. Output ONLY a complete tracker block — no other text.]
+
+Current tracker (fill in the ??? fields):
+${formatTrackerWithBlanks(msg.extra.tt_tracker)}
+
+${contextText}
+
+[TRACKER]
+time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
+location: Full location description
+weather: Weather description, Temperature
+heart: ${lockedHeart}
+characters:
+- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
+[/TRACKER]`;
+
+                    try {
+                        const response = await generateQuietPrompt(fillPrompt, false, true);
+                        const filled = parseTrackerBlock(response);
+                        if (filled) {
+                            msg.extra.tt_tracker = mergeTrackers(msg.extra.tt_tracker, filled);
+                        }
+                    } catch (err) {
+                        console.warn(`[TurboTracker] Could not fill blank fields for message #${idx}:`, err);
+                    }
+                }
+
                 renderMessageTracker(idx);
                 done++;
                 status.text(`${done} / ${aiMessages.length} messages…`);
