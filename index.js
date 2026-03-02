@@ -88,6 +88,31 @@ function advanceTimeString(timeStr, minutes) {
     return `${newHours}:${String(mins).padStart(2, '0')} ${newPeriod}${rest}`;
 }
 
+// ── Heart-in-message extraction ───────────────────────────────
+
+/**
+ * Scan raw message text for an inline heart meter value written by the AI
+ * in a narrative format such as:
+ *   "Black Heart (500) 🖤"   →  500
+ *   "Purple Heart (12500) 💜" → 12500
+ *   "🖤 (500)"               →  500
+ *
+ * Returns the integer value found, or null if nothing matches.
+ */
+function extractHeartFromText(text) {
+    if (!text) return null;
+
+    // Pattern 1: "<Color> Heart (<number>) <emoji>"  (most common AI format)
+    const named = text.match(/\b\w+\s+Heart\s*\(\s*(\d+)\s*\)/i);
+    if (named) return parseInt(named[1], 10);
+
+    // Pattern 2: "<heart-emoji> (<number>)"
+    const emojied = text.match(/(?:🖤|💜|💙|💚|💛|🧡|❤️|❤)\s*\(\s*(\d+)\s*\)/);
+    if (emojied) return parseInt(emojied[1], 10);
+
+    return null;
+}
+
 // ── Tag parsing ───────────────────────────────────────────────
 
 /**
@@ -822,6 +847,14 @@ async function populateAllMessages() {
                     msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
                 }
 
+                // If the message text contains an inline heart value, apply it now
+                const inlineHeart = extractHeartFromText(msg.mes || '');
+                if (inlineHeart !== null) {
+                    const clamped = Math.max(0, Math.min(99999, inlineHeart));
+                    msg.extra.tt_tracker = { ...msg.extra.tt_tracker, heart: clamped };
+                    s.heartPoints = clamped;
+                }
+
                 if (hasBlankFields(msg.extra.tt_tracker)) {
                     // Fill in blank fields via AI
                     const start       = Math.max(0, idx - 6);
@@ -904,16 +937,26 @@ characters:
                 ? formatTrackerForPrompt(prevMsg.extra.tt_tracker)
                 : 'None';
 
-            const populateMaxShift = (Number(s.heartSensitivity) || 5) * 500;
+            const populateMaxShift  = (Number(s.heartSensitivity) || 5) * 500;
             const populatePrevHeart = parseInt(prevMsg?.extra?.tt_tracker?.heart, 10) || 0;
-            const populateHeartLo   = Math.max(0,     populatePrevHeart - populateMaxShift);
-            const populateHeartHi   = Math.min(99999, populatePrevHeart + populateMaxShift);
+
+            // Check if the message text already contains a heart value (e.g. "Black Heart (500) 🖤")
+            const inlineHeart = extractHeartFromText(msg.mes || '');
+            const heartLocked = inlineHeart !== null;
+            const lockedHeartVal = heartLocked ? Math.max(0, Math.min(99999, inlineHeart)) : null;
+
+            const populateHeartLo = heartLocked ? lockedHeartVal : Math.max(0,     populatePrevHeart - populateMaxShift);
+            const populateHeartHi = heartLocked ? lockedHeartVal : Math.min(99999, populatePrevHeart + populateMaxShift);
+
+            const heartInstruction = heartLocked
+                ? `heart must be exactly ${lockedHeartVal} — extracted directly from the message text.`
+                : `heart must be between ${populateHeartLo} and ${populateHeartHi} (previous value was ${populatePrevHeart}).`;
 
             const genPrompt =
 `[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
 
 IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance only by a realistic amount for what the scene depicts. If no previous time exists, invent one that fits the story's setting.
-heart must be between ${populateHeartLo} and ${populateHeartHi} (previous value was ${populatePrevHeart}).]
+${heartInstruction}]
 
 Previous tracker state:
 ${prevTrackerText}
@@ -924,7 +967,7 @@ ${contextText}
 time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
 location: Full location description
 weather: Weather description, Temperature
-heart: integer_value between ${populateHeartLo} and ${populateHeartHi}
+heart: ${heartLocked ? lockedHeartVal : `integer_value between ${populateHeartLo} and ${populateHeartHi}`}
 characters:
 - name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
 [/TRACKER]`;
@@ -933,10 +976,13 @@ characters:
                 const response = await generateQuietPrompt(genPrompt, false, true);
                 const data = parseTrackerBlock(response);
                 if (data) {
-                    if (data.heart !== null) {
+                    if (heartLocked) {
+                        // Always use the value found in the message text, regardless of AI output
+                        data.heart = lockedHeartVal;
+                    } else if (data.heart !== null) {
                         data.heart = clampHeart(data.heart, populatePrevHeart, populateMaxShift);
-                        s.heartPoints = data.heart;
                     }
+                    s.heartPoints = data.heart ?? populatePrevHeart;
                     msg.extra = msg.extra || {};
                     msg.extra.tt_tracker = data;
                     renderMessageTracker(idx);
