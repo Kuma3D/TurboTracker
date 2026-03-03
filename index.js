@@ -841,18 +841,22 @@ async function populateAllMessages() {
         status.text(`0 / ${aiMessages.length} messages…`);
 
         for (const { msg, idx } of aiMessages) {
+            // Always check for an inline heart value in the message text first.
+            // This takes priority over everything — clamp, AI output, stored value.
+            const inlineHeart    = extractHeartFromText(msg.mes || '');
+            const heartLocked    = inlineHeart !== null;
+            const lockedHeartVal = heartLocked ? Math.max(0, Math.min(99999, inlineHeart)) : null;
+
             if (msg.extra?.tt_tracker) {
                 // Strip any leftover [TRACKER] text from msg.mes
                 if ((msg.mes || '').match(/\[TRACKER\]/i)) {
                     msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
                 }
 
-                // If the message text contains an inline heart value, apply it now
-                const inlineHeart = extractHeartFromText(msg.mes || '');
-                if (inlineHeart !== null) {
-                    const clamped = Math.max(0, Math.min(99999, inlineHeart));
-                    msg.extra.tt_tracker = { ...msg.extra.tt_tracker, heart: clamped };
-                    s.heartPoints = clamped;
+                // Inline heart always wins over whatever is stored
+                if (heartLocked) {
+                    msg.extra.tt_tracker = { ...msg.extra.tt_tracker, heart: lockedHeartVal };
+                    s.heartPoints = lockedHeartVal;
                 }
 
                 if (hasBlankFields(msg.extra.tt_tracker)) {
@@ -887,6 +891,8 @@ characters:
                         const filled = parseTrackerBlock(response);
                         if (filled) {
                             msg.extra.tt_tracker = mergeTrackers(msg.extra.tt_tracker, filled);
+                            // Re-apply inline heart after merge so it can't be overwritten
+                            if (heartLocked) msg.extra.tt_tracker.heart = lockedHeartVal;
                         }
                     } catch (err) {
                         console.warn(`[TurboTracker] Could not fill blank fields for message #${idx}:`, err);
@@ -901,11 +907,13 @@ characters:
 
             const existing = parseTrackerBlock(msg.mes || '');
             if (existing) {
-                const maxShift = (Number(s.heartSensitivity) || 5) * 500;
-                if (existing.heart !== null) {
+                if (heartLocked) {
+                    existing.heart = lockedHeartVal;
+                } else if (existing.heart !== null) {
+                    const maxShift = (Number(s.heartSensitivity) || 5) * 500;
                     existing.heart = clampHeart(existing.heart, s.heartPoints, maxShift);
-                    s.heartPoints = existing.heart;
                 }
+                if (existing.heart !== null) s.heartPoints = existing.heart;
                 msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
                 msg.extra = msg.extra || {};
                 msg.extra.tt_tracker = existing;
@@ -917,6 +925,8 @@ characters:
 
             const imported = tryImportSTTracker(msg);
             if (imported) {
+                if (heartLocked) imported.heart = lockedHeartVal;
+                if (imported.heart !== null) s.heartPoints = imported.heart;
                 msg.extra = msg.extra || {};
                 msg.extra.tt_tracker = imported;
                 renderMessageTracker(idx);
@@ -939,11 +949,6 @@ characters:
 
             const populateMaxShift  = (Number(s.heartSensitivity) || 5) * 500;
             const populatePrevHeart = parseInt(prevMsg?.extra?.tt_tracker?.heart, 10) || 0;
-
-            // Check if the message text already contains a heart value (e.g. "Black Heart (500) 🖤")
-            const inlineHeart = extractHeartFromText(msg.mes || '');
-            const heartLocked = inlineHeart !== null;
-            const lockedHeartVal = heartLocked ? Math.max(0, Math.min(99999, inlineHeart)) : null;
 
             const populateHeartLo = heartLocked ? lockedHeartVal : Math.max(0,     populatePrevHeart - populateMaxShift);
             const populateHeartHi = heartLocked ? lockedHeartVal : Math.min(99999, populatePrevHeart + populateMaxShift);
@@ -977,7 +982,6 @@ characters:
                 const data = parseTrackerBlock(response);
                 if (data) {
                     if (heartLocked) {
-                        // Always use the value found in the message text, regardless of AI output
                         data.heart = lockedHeartVal;
                     } else if (data.heart !== null) {
                         data.heart = clampHeart(data.heart, populatePrevHeart, populateMaxShift);
@@ -995,58 +999,34 @@ characters:
             status.text(`${done} / ${aiMessages.length} messages…`);
         }
 
-        // Handle user messages: inherit tracker if none, fill blank fields if partial
+        // Handle user messages: always inherit the tracker from the nearest AI message
+        // (preferring the one immediately following, since that's the same exchange).
         for (let i = 0; i < ctx.chat.length; i++) {
             const umsg = ctx.chat[i];
             if (!umsg.is_user) continue;
 
-            if (!umsg.extra?.tt_tracker) {
-                const inherited = getMostRecentTracker(ctx.chat, i);
-                if (inherited) {
-                    umsg.extra = umsg.extra || {};
-                    umsg.extra.tt_tracker = { ...inherited };
-                    renderMessageTracker(i);
+            // Find the AI message that immediately follows this user message
+            let sourceTracker = null;
+            for (let j = i + 1; j < ctx.chat.length; j++) {
+                if (!ctx.chat[j].is_user && ctx.chat[j].extra?.tt_tracker) {
+                    sourceTracker = ctx.chat[j].extra.tt_tracker;
+                    break;
                 }
-                continue;
+                if (!ctx.chat[j].is_user) break; // AI message exists but has no tracker — stop
             }
+            // Fall back to most recent previous tracker if no following one
+            if (!sourceTracker) sourceTracker = getMostRecentTracker(ctx.chat, i);
 
-            if (hasBlankFields(umsg.extra.tt_tracker)) {
-                const start       = Math.max(0, i - 6);
-                const contextMsgs = ctx.chat.slice(start, i + 1);
-                const contextText = contextMsgs
-                    .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
-                    .join('\n\n');
-                const lockedHeart = parseInt(umsg.extra.tt_tracker.heart, 10) || 0;
-
-                const fillPrompt =
-`[OOC: The tracker below has blank fields marked as ???. Based on the conversation excerpt and character context, fill in ONLY the ??? fields. Do not change any field that already has a value. Output ONLY a complete tracker block — no other text.]
-
-Current tracker (fill in the ??? fields):
-${formatTrackerWithBlanks(umsg.extra.tt_tracker)}
-
-${contextText}
-
-[TRACKER]
-time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
-location: Full location description
-weather: Weather description, Temperature
-heart: ${lockedHeart}
-characters:
-- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
-[/TRACKER]`;
-
-                try {
-                    const response = await generateQuietPrompt(fillPrompt, false, true);
-                    const filled = parseTrackerBlock(response);
-                    if (filled) {
-                        umsg.extra.tt_tracker = mergeTrackers(umsg.extra.tt_tracker, filled);
-                    }
-                } catch (err) {
-                    console.warn(`[TurboTracker] Could not fill blank fields for user message #${i}:`, err);
-                }
+            if (sourceTracker) {
+                // Preserve non-heart fields from an existing tracker if present,
+                // but always sync the heart value from the source
+                const existing = umsg.extra?.tt_tracker;
+                umsg.extra = umsg.extra || {};
+                umsg.extra.tt_tracker = existing
+                    ? { ...existing, heart: sourceTracker.heart }
+                    : { ...sourceTracker };
+                renderMessageTracker(i);
             }
-
-            renderMessageTracker(i);
         }
 
         await ctx.saveChat();
