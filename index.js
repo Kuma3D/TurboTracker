@@ -102,13 +102,13 @@ function advanceTimeString(timeStr, minutes) {
 function extractHeartFromText(text) {
     if (!text) return null;
 
-    // Pattern 1: "<Color> Heart (<number>) <emoji>"  (most common AI format)
-    const named = text.match(/\b\w+\s+Heart\s*\(\s*(\d+)\s*\)/i);
-    if (named) return parseInt(named[1], 10);
+    // Pattern 1: "<Color> Heart (6,500) <emoji>" — allow commas in the number
+    const named = text.match(/\b\w+\s+Heart\s*\(\s*([\d,]+)\s*\)/i);
+    if (named) return parseInt(named[1].replace(/,/g, ''), 10);
 
-    // Pattern 2: "<heart-emoji> (<number>)"
-    const emojied = text.match(/(?:🖤|💜|💙|💚|💛|🧡|❤️|❤)\s*\(\s*(\d+)\s*\)/);
-    if (emojied) return parseInt(emojied[1], 10);
+    // Pattern 2: "<heart-emoji> (6,500)" — allow commas in the number
+    const emojied = text.match(/(?:🖤|💜|💙|💚|💛|🧡|❤️|❤)\s*\(\s*([\d,]+)\s*\)/);
+    if (emojied) return parseInt(emojied[1].replace(/,/g, ''), 10);
 
     return null;
 }
@@ -999,23 +999,13 @@ characters:
             status.text(`${done} / ${aiMessages.length} messages…`);
         }
 
-        // Handle user messages: always inherit the tracker from the nearest AI message
-        // (preferring the one immediately following, since that's the same exchange).
+        // Handle user messages: inherit heart from the most recent previous tracker
+        // (the state as it was when the user sent their message).
         for (let i = 0; i < ctx.chat.length; i++) {
             const umsg = ctx.chat[i];
             if (!umsg.is_user) continue;
 
-            // Find the AI message that immediately follows this user message
-            let sourceTracker = null;
-            for (let j = i + 1; j < ctx.chat.length; j++) {
-                if (!ctx.chat[j].is_user && ctx.chat[j].extra?.tt_tracker) {
-                    sourceTracker = ctx.chat[j].extra.tt_tracker;
-                    break;
-                }
-                if (!ctx.chat[j].is_user) break; // AI message exists but has no tracker — stop
-            }
-            // Fall back to most recent previous tracker if no following one
-            if (!sourceTracker) sourceTracker = getMostRecentTracker(ctx.chat, i);
+            const sourceTracker = getMostRecentTracker(ctx.chat, i);
 
             if (sourceTracker) {
                 // Preserve non-heart fields from an existing tracker if present,
