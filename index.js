@@ -915,34 +915,84 @@ async function populateAllMessages() {
             const heartLocked    = inlineHeart !== null;
             const lockedHeartVal = heartLocked ? Math.max(0, Math.min(99999, inlineHeart)) : null;
 
-            if (msg.extra?.tt_tracker) {
-                // Strip any leftover [TRACKER] text from msg.mes
-                if ((msg.mes || '').match(/\[TRACKER\]/i)) {
-                    msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
+            // Strip any leftover [TRACKER] text from msg.mes regardless of path
+            if ((msg.mes || '').match(/\[TRACKER\]/i)) {
+                msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
+            }
+
+            // ── Priority 1: STTracker data on this exact message ──────────
+            // msg.tracker is ground truth — always wins over any stored tt_tracker.
+            // Build from it, then AI-fill only what's still blank.
+            const stImported = tryImportSTTracker(msg);
+            if (stImported) {
+                // Preserve heart from existing tt_tracker if present (STTracker doesn't track heart)
+                const prevStoredHeart = msg.extra?.tt_tracker?.heart ?? null;
+                stImported.heart = prevStoredHeart;
+
+                if (heartLocked) {
+                    stImported.heart = lockedHeartVal;
                 }
 
+                msg.extra = msg.extra || {};
+                msg.extra.tt_tracker = stImported;
+
+                if (hasBlankFields(stImported)) {
+                    const start       = Math.max(0, idx - 6);
+                    const contextMsgs = ctx.chat.slice(start, idx + 1);
+                    const contextText = contextMsgs
+                        .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
+                        .join('\n\n');
+                    const lockedHeart = parseInt(stImported.heart, 10) || 0;
+                    const fillPrompt =
+`[OOC: The tracker below has blank fields marked as ???. Based on the conversation excerpt and character context, fill in ONLY the ??? fields. Do not change any field that already has a value. Output ONLY a complete tracker block — no other text.]
+
+Current tracker (fill in the ??? fields):
+${formatTrackerWithBlanks(stImported)}
+
+${contextText}
+
+[TRACKER]
+time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
+location: Full location description
+weather: Weather description, Temperature
+heart: ${lockedHeart}
+characters:
+- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
+[/TRACKER]`;
+                    try {
+                        const response = await generateQuietPrompt(fillPrompt, false, true);
+                        const filled = parseTrackerBlock(response);
+                        if (filled) {
+                            msg.extra.tt_tracker = mergeTrackers(stImported, filled);
+                            if (heartLocked) msg.extra.tt_tracker.heart = lockedHeartVal;
+                        }
+                    } catch (err) {
+                        console.warn(`[TurboTracker] Could not fill blank ST fields for message #${idx}:`, err);
+                    }
+                }
+
+                if (msg.extra.tt_tracker.heart !== null) s.heartPoints = parseInt(msg.extra.tt_tracker.heart, 10) || 0;
+                renderMessageTracker(idx);
+                done++;
+                status.text(`${done} / ${aiMessages.length} messages…`);
+                continue;
+            }
+
+            // ── Priority 2: Already has a tt_tracker (no STTracker on this msg) ──
+            if (msg.extra?.tt_tracker) {
                 // Inline heart always wins over whatever is stored
                 if (heartLocked) {
                     msg.extra.tt_tracker = { ...msg.extra.tt_tracker, heart: lockedHeartVal };
                     s.heartPoints = lockedHeartVal;
                 }
 
-                // If time is blank but STTracker data exists on this message, pull time from it
-                if (isBlankValue(msg.extra.tt_tracker.time)) {
-                    const stImport = tryImportSTTracker(msg);
-                    if (stImport?.time) msg.extra.tt_tracker.time = stImport.time;
-                }
-
                 if (hasBlankFields(msg.extra.tt_tracker)) {
-                    // Fill in blank fields via AI
                     const start       = Math.max(0, idx - 6);
                     const contextMsgs = ctx.chat.slice(start, idx + 1);
                     const contextText = contextMsgs
                         .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
                         .join('\n\n');
-
                     const lockedHeart = parseInt(msg.extra.tt_tracker.heart, 10) || 0;
-
                     const fillPrompt =
 `[OOC: The tracker below has blank fields marked as ???. Based on the conversation excerpt and character context, fill in ONLY the ??? fields. Do not change any field that already has a value. Output ONLY a complete tracker block — no other text.]
 
@@ -959,13 +1009,11 @@ heart: ${lockedHeart}
 characters:
 - name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
 [/TRACKER]`;
-
                     try {
                         const response = await generateQuietPrompt(fillPrompt, false, true);
                         const filled = parseTrackerBlock(response);
                         if (filled) {
                             msg.extra.tt_tracker = mergeTrackers(msg.extra.tt_tracker, filled);
-                            // Re-apply inline heart after merge so it can't be overwritten
                             if (heartLocked) msg.extra.tt_tracker.heart = lockedHeartVal;
                         }
                     } catch (err) {
@@ -979,6 +1027,7 @@ characters:
                 continue;
             }
 
+            // ── Priority 3: Inline [TRACKER] block in message text ────────
             const existing = parseTrackerBlock(msg.mes || '');
             if (existing) {
                 if (heartLocked) {
@@ -997,19 +1046,7 @@ characters:
                 continue;
             }
 
-            const imported = tryImportSTTracker(msg);
-            if (imported) {
-                if (heartLocked) imported.heart = lockedHeartVal;
-                if (imported.heart !== null) s.heartPoints = imported.heart;
-                msg.extra = msg.extra || {};
-                msg.extra.tt_tracker = imported;
-                renderMessageTracker(idx);
-                done++;
-                status.text(`${done} / ${aiMessages.length} messages…`);
-                continue;
-            }
-
-            // Ask the AI — include previous tracker as reference
+            // ── Priority 4: Ask the AI ────────────────────────────────────
             const start       = Math.max(0, idx - 6);
             const contextMsgs = ctx.chat.slice(start, idx + 1);
             const contextText = contextMsgs
@@ -1288,7 +1325,7 @@ function loadSettingsUi() {
                     Regenerate All Trackers
                 </button>
             </div>
-            <small>Populate: infers tracker data for messages missing it. Regenerate: clears and rebuilds all trackers, preserving original ST-Tracker data.</small>
+            <small>Populate: infers tracker data for messages missing it. Regenerate: clears and rebuilds all trackers from scratch.</small>
         </div>
     </div>
 </div>`;
