@@ -1106,17 +1106,26 @@ characters:
             status.text(`${done} / ${aiMessages.length} messages…`);
         }
 
-        // Handle user messages: inherit heart from the most recent previous tracker
-        // (the state as it was when the user sent their message).
+        // Handle user messages: use their own STTracker data if available,
+        // otherwise inherit from the most recent preceding tracker.
         for (let i = 0; i < ctx.chat.length; i++) {
             const umsg = ctx.chat[i];
             if (!umsg.is_user) continue;
 
-            const sourceTracker = getMostRecentTracker(ctx.chat, i);
+            // If this user message has its own STTracker data, use it directly
+            const stImported = tryImportSTTracker(umsg);
+            if (stImported) {
+                const prevStoredHeart = umsg.extra?.tt_tracker?.heart ?? null;
+                stImported.heart = prevStoredHeart;
+                umsg.extra = umsg.extra || {};
+                umsg.extra.tt_tracker = stImported;
+                renderMessageTracker(i);
+                continue;
+            }
 
+            // Otherwise inherit from the nearest preceding tracker
+            const sourceTracker = getMostRecentTracker(ctx.chat, i);
             if (sourceTracker) {
-                // Preserve non-heart fields from an existing tracker if present,
-                // but always sync the heart value from the source
                 const existing = umsg.extra?.tt_tracker;
                 umsg.extra = umsg.extra || {};
                 umsg.extra.tt_tracker = existing
