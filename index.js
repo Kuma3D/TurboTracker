@@ -242,6 +242,71 @@ function getMostRecentTracker(chat, beforeMesId) {
 }
 
 /**
+ * Scan backwards for the nearest raw STTracker time string.
+ * Checks both msg.tracker.Time / msg.tracker.time fields.
+ */
+function getMostRecentSTTrackerTime(chat, beforeMesId) {
+    for (let i = beforeMesId - 1; i >= 0; i--) {
+        const t = chat[i]?.tracker;
+        if (t && typeof t === 'object') {
+            const time = t.Time || t.time;
+            if (time) return String(time);
+        }
+    }
+    return null;
+}
+
+/**
+ * Returns { trackerText, prevHeart } for use in generation prompts.
+ * Prefers an existing tt_tracker as the base, but if its time is blank/unknown
+ * it supplements it with the nearest raw STTracker time found scanning backwards.
+ * If no tt_tracker exists at all, attempts to build a minimal context from STTracker data.
+ */
+function getBestPrevContext(chat, beforeMesId) {
+    const ttTracker = getMostRecentTracker(chat, beforeMesId);
+
+    // Find the best available time from raw STTracker data
+    const stTime = getMostRecentSTTrackerTime(chat, beforeMesId);
+
+    if (ttTracker) {
+        // If tt_tracker has a good time, use it as-is
+        if (!isBlankValue(ttTracker.time)) {
+            return {
+                trackerText: formatTrackerForPrompt(ttTracker),
+                prevHeart:   parseInt(ttTracker.heart, 10) || 0,
+            };
+        }
+        // tt_tracker exists but time is blank — patch it with STTracker time if available
+        const patched = { ...ttTracker, time: stTime || ttTracker.time };
+        return {
+            trackerText: formatTrackerForPrompt(patched),
+            prevHeart:   parseInt(ttTracker.heart, 10) || 0,
+        };
+    }
+
+    // No tt_tracker at all — try to build context from raw STTracker data
+    if (stTime) {
+        const synth = { time: stTime, location: null, weather: null, heart: 0, characters: [] };
+        // Also scan for the nearest full STTracker object for other fields
+        for (let i = beforeMesId - 1; i >= 0; i--) {
+            const t = chat[i]?.tracker;
+            if (t && typeof t === 'object' && Object.keys(t).length > 0) {
+                const imported = convertSTTrackerToTT(t);
+                if (imported) {
+                    synth.location   = imported.location;
+                    synth.weather    = imported.weather;
+                    synth.characters = imported.characters;
+                }
+                break;
+            }
+        }
+        return { trackerText: formatTrackerForPrompt(synth), prevHeart: 0 };
+    }
+
+    return { trackerText: 'None', prevHeart: 0 };
+}
+
+/**
  * Format a tt_tracker object as plain text for use in AI prompts.
  */
 function formatTrackerForPrompt(data) {
@@ -519,11 +584,7 @@ async function regenTracker(mesId) {
         const s        = getSettings();
         const maxShift = (Number(s.heartSensitivity) || 5) * 500;
 
-        const prevMsg = ctx.chat.slice(0, mesId).reverse().find(m => m.extra?.tt_tracker);
-        const prevTrackerText = prevMsg
-            ? formatTrackerForPrompt(prevMsg.extra.tt_tracker)
-            : 'None';
-        const prevHeart = parseInt(prevMsg?.extra?.tt_tracker?.heart, 10) || 0;
+        const { trackerText: prevTrackerText, prevHeart } = getBestPrevContext(ctx.chat, mesId);
         const heartLo   = Math.max(0,     prevHeart - maxShift);
         const heartHi   = Math.min(99999, prevHeart + maxShift);
 
@@ -789,21 +850,27 @@ function formatTrackerWithBlanks(tracker) {
 }
 
 function mergeTrackers(existing, filled) {
+    const mergedChars = (existing.characters || []).map(ec => {
+        const fc = (filled.characters || []).find(c => c.name === ec.name) || {};
+        return {
+            name:        ec.name,
+            description: ec.description || fc.description || '',
+            outfit:      ec.outfit      || fc.outfit      || '',
+            state:       ec.state       || fc.state       || '',
+            position:    ec.position    || fc.position    || '',
+        };
+    });
+
+    // Append any characters the AI returned that weren't in the existing tracker
+    const existingNames = new Set((existing.characters || []).map(c => c.name));
+    const newChars = (filled.characters || []).filter(c => c.name && !existingNames.has(c.name));
+
     return {
         time:       isBlankValue(existing.time)     && filled.time     ? filled.time     : existing.time,
         location:   isBlankValue(existing.location) && filled.location ? filled.location : existing.location,
         weather:    isBlankValue(existing.weather)  && filled.weather  ? filled.weather  : existing.weather,
         heart:      existing.heart, // never overwrite heart retroactively
-        characters: (existing.characters || []).map(ec => {
-            const fc = (filled.characters || []).find(c => c.name === ec.name) || {};
-            return {
-                name:        ec.name,
-                description: ec.description || fc.description || '',
-                outfit:      ec.outfit      || fc.outfit      || '',
-                state:       ec.state       || fc.state       || '',
-                position:    ec.position    || fc.position    || '',
-            };
-        }),
+        characters: [...mergedChars, ...newChars],
     };
 }
 
@@ -818,6 +885,7 @@ async function populateAllMessages() {
     const btn    = $('#tt-populate-btn');
     const status = $('#tt-populate-status');
     btn.prop('disabled', true);
+    $('#tt-regen-all-btn').prop('disabled', true);
 
     try {
         const s   = getSettings();
@@ -857,6 +925,12 @@ async function populateAllMessages() {
                 if (heartLocked) {
                     msg.extra.tt_tracker = { ...msg.extra.tt_tracker, heart: lockedHeartVal };
                     s.heartPoints = lockedHeartVal;
+                }
+
+                // If time is blank but STTracker data exists on this message, pull time from it
+                if (isBlankValue(msg.extra.tt_tracker.time)) {
+                    const stImport = tryImportSTTracker(msg);
+                    if (stImport?.time) msg.extra.tt_tracker.time = stImport.time;
                 }
 
                 if (hasBlankFields(msg.extra.tt_tracker)) {
@@ -942,13 +1016,9 @@ characters:
                 .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
                 .join('\n\n');
 
-            const prevMsg = ctx.chat.slice(0, idx).reverse().find(m => m.extra?.tt_tracker);
-            const prevTrackerText = prevMsg
-                ? formatTrackerForPrompt(prevMsg.extra.tt_tracker)
-                : 'None';
+            const { trackerText: prevTrackerText, prevHeart: populatePrevHeart } = getBestPrevContext(ctx.chat, idx);
 
             const populateMaxShift  = (Number(s.heartSensitivity) || 5) * 500;
-            const populatePrevHeart = parseInt(prevMsg?.extra?.tt_tracker?.heart, 10) || 0;
 
             const populateHeartLo = heartLocked ? lockedHeartVal : Math.max(0,     populatePrevHeart - populateMaxShift);
             const populateHeartHi = heartLocked ? lockedHeartVal : Math.min(99999, populatePrevHeart + populateMaxShift);
@@ -1027,8 +1097,24 @@ characters:
     } finally {
         isPopulating = false;
         btn.prop('disabled', false);
+        $('#tt-regen-all-btn').prop('disabled', false);
         injectPrompt(true); // restore full prompt when done
     }
+}
+
+async function regenerateAllTrackers() {
+    if (isPopulating) return;
+    const ctx = getContext();
+    if (!ctx.chat || ctx.chat.length === 0) return;
+
+    // Clear all tt_tracker entries, preserving everything else (msg.tracker, msg.mes, etc.)
+    ctx.chat.forEach(msg => {
+        if (msg.extra?.tt_tracker) delete msg.extra.tt_tracker;
+    });
+    $('.tt-container').remove();
+
+    // Re-run full populate from scratch — STTracker data and time chains re-read fresh
+    await populateAllMessages();
 }
 
 // ── Event handlers ────────────────────────────────────────────
@@ -1192,11 +1278,17 @@ function loadSettingsUi() {
             <div class="tt-setting-row">
                 <button id="tt-populate-btn" class="menu_button menu_button_icon">
                     <i class="fa-solid fa-wand-magic-sparkles"></i>
-                    Populate All Messages
+                    Populate All Trackers
                 </button>
                 <span id="tt-populate-status" class="tt-status"></span>
             </div>
-            <small>Uses the AI to infer tracker data for every message that is missing it.</small>
+            <div class="tt-setting-row">
+                <button id="tt-regen-all-btn" class="menu_button menu_button_icon">
+                    <i class="fa-solid fa-rotate-left"></i>
+                    Regenerate All Trackers
+                </button>
+            </div>
+            <small>Populate: infers tracker data for messages missing it. Regenerate: clears and rebuilds all trackers, preserving original ST-Tracker data.</small>
         </div>
     </div>
 </div>`;
@@ -1242,6 +1334,7 @@ function loadSettingsUi() {
     });
 
     $('#tt-populate-btn').on('click', populateAllMessages);
+    $('#tt-regen-all-btn').on('click', regenerateAllTrackers);
 }
 
 // ── Init ──────────────────────────────────────────────────────
