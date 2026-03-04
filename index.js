@@ -257,7 +257,7 @@ function getMostRecentSTTrackerTime(chat, beforeMesId) {
 }
 
 /**
- * Returns { trackerText, prevHeart } for use in generation prompts.
+ * Returns { trackerText, prevHeart, prevTime } for use in generation prompts.
  * Prefers an existing tt_tracker as the base, but if its time is blank/unknown
  * it supplements it with the nearest raw STTracker time found scanning backwards.
  * If no tt_tracker exists at all, attempts to build a minimal context from STTracker data.
@@ -274,13 +274,16 @@ function getBestPrevContext(chat, beforeMesId) {
             return {
                 trackerText: formatTrackerForPrompt(ttTracker),
                 prevHeart:   parseInt(ttTracker.heart, 10) || 0,
+                prevTime:    ttTracker.time,
             };
         }
         // tt_tracker exists but time is blank — patch it with STTracker time if available
-        const patched = { ...ttTracker, time: stTime || ttTracker.time };
+        const patchedTime = stTime || ttTracker.time;
+        const patched = { ...ttTracker, time: patchedTime };
         return {
             trackerText: formatTrackerForPrompt(patched),
             prevHeart:   parseInt(ttTracker.heart, 10) || 0,
+            prevTime:    patchedTime || null,
         };
     }
 
@@ -300,10 +303,10 @@ function getBestPrevContext(chat, beforeMesId) {
                 break;
             }
         }
-        return { trackerText: formatTrackerForPrompt(synth), prevHeart: 0 };
+        return { trackerText: formatTrackerForPrompt(synth), prevHeart: 0, prevTime: stTime };
     }
 
-    return { trackerText: 'None', prevHeart: 0 };
+    return { trackerText: 'None', prevHeart: 0, prevTime: null };
 }
 
 /**
@@ -988,6 +991,8 @@ characters:
                 if (heartLocked) {
                     msg.extra.tt_tracker = { ...msg.extra.tt_tracker, heart: lockedHeartVal };
                     s.heartPoints = lockedHeartVal;
+                } else if (msg.extra.tt_tracker.heart !== null) {
+                    s.heartPoints = parseInt(msg.extra.tt_tracker.heart, 10) || 0;
                 }
 
                 if (hasBlankFields(msg.extra.tt_tracker)) {
@@ -1057,7 +1062,15 @@ characters:
                 .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
                 .join('\n\n');
 
-            const { trackerText: prevTrackerText, prevHeart: populatePrevHeart } = getBestPrevContext(ctx.chat, idx);
+            const { trackerText: prevTrackerText, prevHeart: populatePrevHeart, prevTime: populatePrevTime } = getBestPrevContext(ctx.chat, idx);
+
+            // Pre-compute the time so the AI cannot drift — advance by 2 minutes from the
+            // last known time. The AI can still write a larger jump if the scene warrants it,
+            // but this gives a concrete anchor so it doesn't invent times from whole cloth.
+            const computedTime = populatePrevTime ? advanceTimeString(populatePrevTime, 2) : null;
+            const timeAnchor   = computedTime
+                ? `The previous time was "${populatePrevTime}". Advance it by a realistic amount for what the scene depicts — for a normal brief exchange this is 1–5 minutes. Do NOT jump hours unless the scene explicitly describes a major time skip.`
+                : `No previous time exists — invent one that fits the story's setting and keep it consistent going forward.`;
 
             const populateMaxShift  = (Number(s.heartSensitivity) || 5) * 500;
 
@@ -1071,7 +1084,7 @@ characters:
             const genPrompt =
 `[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
 
-IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance by only a small, realistic amount — typically 1 to 10 minutes for a normal exchange, only more if the scene explicitly depicts a significant time skip. Do not jump hours without clear story justification.
+TIME: IN-STORY fiction time only — NEVER the real-world current date or time. ${timeAnchor}
 ${heartInstruction}]
 
 Previous tracker state:
