@@ -1115,8 +1115,8 @@ characters:
             // If this user message has its own STTracker data, use it directly
             const stImported = tryImportSTTracker(umsg);
             if (stImported) {
-                const prevStoredHeart = umsg.extra?.tt_tracker?.heart ?? null;
-                stImported.heart = prevStoredHeart;
+                const sourceTracker = getMostRecentTracker(ctx.chat, i);
+                stImported.heart = sourceTracker?.heart ?? null;
                 umsg.extra = umsg.extra || {};
                 umsg.extra.tt_tracker = stImported;
                 renderMessageTracker(i);
