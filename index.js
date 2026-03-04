@@ -624,7 +624,7 @@ characters:
             genPrompt =
 `[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
 
-IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance only by a realistic amount for what the scene depicts. If no previous time exists, invent one that fits the story's setting.
+IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance by only a small, realistic amount — typically 1 to 10 minutes for a normal exchange, only more if the scene explicitly depicts a significant time skip. Do not jump hours without clear story justification.
 heart must be between ${heartLo} and ${heartHi} (previous value was ${prevHeart}).]
 
 Previous tracker state:
@@ -925,9 +925,10 @@ async function populateAllMessages() {
             // Build from it, then AI-fill only what's still blank.
             const stImported = tryImportSTTracker(msg);
             if (stImported) {
-                // Preserve heart from existing tt_tracker if present (STTracker doesn't track heart)
-                const prevStoredHeart = msg.extra?.tt_tracker?.heart ?? null;
-                stImported.heart = prevStoredHeart;
+                // Heart comes from the nearest preceding processed tracker,
+                // since STTracker doesn't track heart.
+                const prevContext = getMostRecentTracker(ctx.chat, idx);
+                stImported.heart = prevContext?.heart ?? null;
 
                 if (heartLocked) {
                     stImported.heart = lockedHeartVal;
@@ -971,7 +972,10 @@ characters:
                     }
                 }
 
-                if (msg.extra.tt_tracker.heart !== null) s.heartPoints = parseInt(msg.extra.tt_tracker.heart, 10) || 0;
+                // Always update the running heart state so subsequent messages have a correct baseline
+                if (msg.extra.tt_tracker.heart !== null) {
+                    s.heartPoints = parseInt(msg.extra.tt_tracker.heart, 10) || 0;
+                }
                 renderMessageTracker(idx);
                 done++;
                 status.text(`${done} / ${aiMessages.length} messages…`);
@@ -1067,7 +1071,7 @@ characters:
             const genPrompt =
 `[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
 
-IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance only by a realistic amount for what the scene depicts. If no previous time exists, invent one that fits the story's setting.
+IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance by only a small, realistic amount — typically 1 to 10 minutes for a normal exchange, only more if the scene explicitly depicts a significant time skip. Do not jump hours without clear story justification.
 ${heartInstruction}]
 
 Previous tracker state:
@@ -1097,6 +1101,23 @@ characters:
                     msg.extra = msg.extra || {};
                     msg.extra.tt_tracker = data;
                     renderMessageTracker(idx);
+                } else {
+                    // Retry once if the AI didn't produce a parseable tracker block
+                    const retry = await generateQuietPrompt(genPrompt, false, true);
+                    const retryData = parseTrackerBlock(retry);
+                    if (retryData) {
+                        if (heartLocked) {
+                            retryData.heart = lockedHeartVal;
+                        } else if (retryData.heart !== null) {
+                            retryData.heart = clampHeart(retryData.heart, populatePrevHeart, populateMaxShift);
+                        }
+                        s.heartPoints = retryData.heart ?? populatePrevHeart;
+                        msg.extra = msg.extra || {};
+                        msg.extra.tt_tracker = retryData;
+                        renderMessageTracker(idx);
+                    } else {
+                        console.warn(`[TurboTracker] No parseable tracker block from AI for message #${idx} after retry.`);
+                    }
                 }
             } catch (err) {
                 console.warn(`[TurboTracker] Could not generate tracker for message #${idx}:`, err);
