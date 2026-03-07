@@ -143,6 +143,35 @@ function parseMinuteOffset(val) {
     return (n >= 1 && n <= 1440) ? n : null;
 }
 
+/**
+ * Estimate the number of in-story minutes that likely pass during a message,
+ * based on keywords in the message text.  Used as a heuristic fallback when
+ * the AI does not return a valid integer minute offset.
+ *
+ * Priority order:
+ *   1. Explicit long time skip keywords → 90 min
+ *   2. Travel / movement keywords       → 10 min
+ *   3. Meals / grooming / tasks         → 15 min
+ *   4. Default casual exchange          → 3–5 min scaled by message length
+ */
+function estimateMinutesFromContent(text) {
+    const t = (text || '').toLowerCase();
+
+    if (/\b(hours?\s+later|next\s+(?:day|morning|afternoon|evening|night)|the\s+following\s+(?:day|morning)|woke?\s+up|fell\s+asleep|overnight|days?\s+later)\b/.test(t)) {
+        return 90;
+    }
+    if (/\b(walk(?:ed|s|ing)|ran\b|running|arriv(?:ed|es|ing)|depart(?:ed)|left\s+(?:the|a|her|his|their|your)\b|head(?:ed|ing)\s+(?:to\b|towards?\b|for\b|back\b)|travel(?:led|ing)?|drove\b|driv(?:es|ing)|riding|climb(?:ed|ing)|descend(?:ed|ing)|jogg(?:ed|ing)|march(?:ed|ing)|stroll(?:ed|ing)|wander(?:ed|ing))\b/.test(t)) {
+        return 10;
+    }
+    if (/\b(eat(?:ing|s|en)?|meal\b|dinner\b|lunch\b|breakfast\b|drink(?:ing)?|bath(?:ing)?|shower(?:ing)?|dress(?:ed|ing)\b|chang(?:ed|ing)\s+(?:into|out|clothes?)|groom(?:ing)?|cook(?:ing)?|prepar(?:ed|ing))\b/.test(t)) {
+        return 15;
+    }
+    // Default: scale by length — longer exchanges take more in-story time
+    if (t.length > 600) return 5;
+    if (t.length > 300) return 4;
+    return 3;
+}
+
 // ── Heart-in-message extraction ───────────────────────────────
 
 /**
@@ -588,7 +617,7 @@ function populatePrecedingUserMessages(aiMesId) {
         const tracker = getMostRecentTracker(ctx.chat, i);
         if (tracker) {
             const advancedTracker = { ...tracker };
-            const nudge = 1 + Math.floor(Math.random() * 3); // 1–3 minutes
+            const nudge = 1; // exactly 1 min — keeps user messages strictly before the following AI message
             advancedTracker.time = advanceTimeString(tracker.time, nudge);
             ttDebug(`  #${i} user: base="${tracker.time}" +${nudge}min → "${advancedTracker.time}"`);
             msg.extra = msg.extra || {};
@@ -1154,20 +1183,12 @@ ${fillCharsText}
             }
 
             // ── Priority 4: Ask the AI ────────────────────────────────────
-            const { trackerText: prevTrackerText, prevHeart: populatePrevHeart, prevTime: populatePrevTime } = getBestPrevContext(ctx.chat, idx);
+            const { prevHeart: populatePrevHeart, prevTime: populatePrevTime } = getBestPrevContext(ctx.chat, idx);
             const prevTrackerObj = getMostRecentTracker(ctx.chat, idx);
 
             ttDebug(`  #${idx} P4: AI gen — prevTime="${populatePrevTime || 'none'}" prevHeart=${populatePrevHeart}`);
 
-            // Pre-compute the time anchor and build a pre-filled template so the AI
-            // needs only to validate/update values rather than generate content from scratch.
-            // Sending a blank template alongside conversation context was causing the AI to
-            // continue the roleplay instead of outputting a structured tracker block.
-            const computedTime  = populatePrevTime ? advanceTimeString(populatePrevTime, 2) : null;
-            const prefilledTime = computedTime || populatePrevTime || 'h:MM AM/PM; MM/DD/YYYY (DayOfWeek)';
-
             const populateMaxShift = (Number(s.heartSensitivity) || 5) * 500;
-
             const populateHeartLo = heartLocked ? lockedHeartVal : Math.max(0,     populatePrevHeart - populateMaxShift);
             const populateHeartHi = heartLocked ? lockedHeartVal : Math.min(99999, populatePrevHeart + populateMaxShift);
 
@@ -1175,6 +1196,39 @@ ${fillCharsText}
                 ? `heart must be exactly ${lockedHeartVal} — extracted directly from the message text.`
                 : `heart must be between ${populateHeartLo} and ${populateHeartHi} (previous value was ${populatePrevHeart}).`;
 
+            // ── Step 1: Determine minute offset ───────────────────────────
+            // Ask the AI for just a single integer — a much simpler task than a full tracker,
+            // so far less likely to produce roleplay.  Fall back to content heuristic on failure.
+            let advanceMinutes = null;
+            if (populatePrevTime) {
+                const minutePrompt =
+`[OOC: How many in-story minutes pass during the following story excerpt? Reply with ONLY a single integer. Examples: brief dialogue exchange = 1-5, moving to a nearby location = 5-15, a longer journey = 15-60, a large time skip = 60+. No other text — just the integer.]
+${msg.mes.slice(0, 600)}`;
+                try {
+                    const minuteResp = await generateQuietPrompt(minutePrompt, false, true);
+                    // Extract the first 1-4 digit number we can find in the response
+                    const firstNum = minuteResp.trim().match(/\b(\d{1,4})\b/);
+                    const rawNum   = firstNum ? parseInt(firstNum[1], 10) : null;
+                    advanceMinutes = (rawNum !== null && rawNum >= 1 && rawNum <= 1440) ? rawNum : null;
+                    ttDebug(`  #${idx} P4 step1 raw: "${minuteResp.slice(0, 80).replace(/\n/g, '\\n')}" → minutes=${advanceMinutes}`);
+                } catch (err) {
+                    ttDebug(`  #${idx} P4 step1 ERROR: ${err.message}`);
+                }
+            }
+
+            if (advanceMinutes === null) {
+                advanceMinutes = estimateMinutesFromContent(msg.mes || '');
+                ttDebug(`  #${idx} P4: heuristic minutes=${advanceMinutes} (msgLen=${(msg.mes || '').length})`);
+            }
+
+            // Compute the final time — we own this value and the AI will not be asked to change it
+            const prefilledTime = populatePrevTime
+                ? advanceTimeString(populatePrevTime, advanceMinutes)
+                : 'h:MM AM/PM; MM/DD/YYYY (DayOfWeek)';
+
+            ttDebug(`  #${idx} P4: prefilledTime="${prefilledTime}" (advance=${advanceMinutes}min)`);
+
+            // ── Step 2: Fill remaining tracker fields ─────────────────────
             const prefilledLocation  = prevTrackerObj?.location || 'Unknown';
             const prefilledWeather   = prevTrackerObj?.weather  || 'Unknown';
             // Carry forward name/description/outfit but mark state/position as ??? —
@@ -1186,35 +1240,25 @@ ${fillCharsText}
                 : `- name: CharacterName | description: Physical description | outfit: Clothing | state: Emotional state | position: Position`;
 
             const genPrompt =
-`[OOC: Complete this scene tracker. Fill each field based on the current story moment. For the "time" field, output ONLY an integer — the number of in-story minutes that pass during this exchange. Examples: brief back-and-forth dialogue = 1-5 min, moving to a nearby location = 5-15 min, a longer journey = 15-60 min. Do NOT output a clock time. ${heartInstruction} Output ONLY the [TRACKER]...[/TRACKER] block — no story text, no dialogue, nothing else.]
+`[OOC: Complete this scene tracker. Fill each field based on the current story moment. The time is already set — do NOT change it. ${heartInstruction} Output ONLY the [TRACKER]...[/TRACKER] block — no story text, no dialogue, nothing else.]
 
 [TRACKER]
-time: [integer minutes elapsed, e.g. 3]
+time: ${prefilledTime}
 location: ${prefilledLocation}
 weather: ${prefilledWeather}
-heart: ${heartLocked ? lockedHeartVal : `integer_value between ${populateHeartLo} and ${populateHeartHi}`}
+heart: ${heartLocked ? lockedHeartVal : `integer between ${populateHeartLo} and ${populateHeartHi}`}
 characters:
 ${prefilledCharsText}
 [/TRACKER]`;
 
             try {
                 const response = await generateQuietPrompt(genPrompt, false, true);
-                ttDebug(`  #${idx} P4 raw: "${response.slice(0, 400).replace(/\n/g, '\\n')}"`);
+                ttDebug(`  #${idx} P4 step2 raw: "${response.slice(0, 400).replace(/\n/g, '\\n')}"`);
                 const data = parseTrackerBlock(response);
                 ttDebug(`  #${idx} P4 result: ${data ? `time="${data.time}" heart=${data.heart}` : 'null — retrying'}`);
                 if (data) {
-                    // Convert time from minute offset to absolute time string.
-                    // Fall back to our pre-computed 2-min advance if AI didn't output a number.
-                    const aiMins = parseMinuteOffset(data.time);
-                    if (aiMins !== null && populatePrevTime) {
-                        data.time = advanceTimeString(populatePrevTime, aiMins);
-                        ttDebug(`  #${idx} P4: AI minutes=${aiMins} → "${data.time}"`);
-                    } else {
-                        if (data.time !== prefilledTime) {
-                            ttDebug(`  #${idx} P4: overriding AI time "${data.time}" → "${prefilledTime}"`);
-                        }
-                        data.time = prefilledTime;
-                    }
+                    // Always enforce our pre-computed time — never let the AI override it
+                    data.time = prefilledTime;
                     if (heartLocked) {
                         data.heart = lockedHeartVal;
                     } else if (data.heart !== null) {
@@ -1225,18 +1269,13 @@ ${prefilledCharsText}
                     msg.extra.tt_tracker = data;
                     renderMessageTracker(idx);
                 } else {
-                    // Retry once if the AI didn't produce a parseable tracker block
+                    // Retry once
                     const retry = await generateQuietPrompt(genPrompt, false, true);
                     ttDebug(`  #${idx} P4 retry raw: "${retry.slice(0, 400).replace(/\n/g, '\\n')}"`);
                     const retryData = parseTrackerBlock(retry);
-                    ttDebug(`  #${idx} P4 retry: ${retryData ? `time="${retryData.time}"` : 'null (giving up)'}`);
+                    ttDebug(`  #${idx} P4 retry: ${retryData ? `time="${retryData.time}"` : 'null — using fallback'}`);
                     if (retryData) {
-                        const retryMins = parseMinuteOffset(retryData.time);
-                        if (retryMins !== null && populatePrevTime) {
-                            retryData.time = advanceTimeString(populatePrevTime, retryMins);
-                        } else {
-                            retryData.time = prefilledTime;
-                        }
+                        retryData.time = prefilledTime;
                         if (heartLocked) {
                             retryData.heart = lockedHeartVal;
                         } else if (retryData.heart !== null) {
@@ -1247,7 +1286,18 @@ ${prefilledCharsText}
                         msg.extra.tt_tracker = retryData;
                         renderMessageTracker(idx);
                     } else {
-                        console.warn(`[TurboTracker] No parseable tracker block from AI for message #${idx} after retry.`);
+                        // Both tracker fills failed — clone previous tracker with our computed time
+                        ttDebug(`  #${idx} P4 fallback: cloning prev tracker, time="${prefilledTime}"`);
+                        const fallback = prevTrackerObj
+                            ? { ...prevTrackerObj, time: prefilledTime, heart: heartLocked ? lockedHeartVal : (prevTrackerObj.heart ?? populatePrevHeart) }
+                            : { time: prefilledTime, location: 'Unknown', weather: 'Unknown', heart: heartLocked ? lockedHeartVal : populatePrevHeart, characters: [] };
+                        if (!heartLocked && fallback.heart !== null) {
+                            s.heartPoints = parseInt(fallback.heart, 10) || populatePrevHeart;
+                        }
+                        msg.extra = msg.extra || {};
+                        msg.extra.tt_tracker = fallback;
+                        renderMessageTracker(idx);
+                        console.warn(`[TurboTracker] Used fallback tracker for message #${idx}.`);
                     }
                 }
             } catch (err) {
