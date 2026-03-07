@@ -16,6 +16,7 @@ const EXT_NAME = 'turbo-tracker';
 
 const DEFAULT_SETTINGS = {
     enabled: true,
+    debugEnabled: false,
     heartPoints: 0,
     heartSensitivity: 5,
     defaultHeartValue: 0,
@@ -29,6 +30,25 @@ const DEFAULT_SETTINGS = {
         { emoji: '❤️', min: 60000, max: 99999 },
     ],
 };
+
+// ── Debug logging ─────────────────────────────────────────────
+
+const debugLines = [];
+const MAX_DEBUG_LINES = 500;
+
+function ttDebug(...args) {
+    if (!extension_settings?.[EXT_NAME]?.debugEnabled) return;
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const msg = args.map(a => (a !== null && typeof a === 'object') ? JSON.stringify(a) : String(a)).join(' ');
+    const line = `[${ts}] ${msg}`;
+    debugLines.push(line);
+    if (debugLines.length > MAX_DEBUG_LINES) debugLines.shift();
+    const $log = $('#tt-debug-log');
+    if ($log.length) {
+        $log.val(debugLines.join('\n'));
+        $log[0].scrollTop = $log[0].scrollHeight;
+    }
+}
 
 // ── Heart meter ───────────────────────────────────────────────
 
@@ -63,7 +83,7 @@ function clampHeart(rawValue, prevHeart, maxShift) {
 function advanceTimeString(timeStr, minutes) {
     if (!timeStr) return timeStr;
     const m = timeStr.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)(.*)/i);
-    if (!m) return timeStr;
+    if (!m) { ttDebug(`advanceTime: no-match for "${timeStr}"`); return timeStr; }
 
     let hours = parseInt(m[1], 10);
     let mins  = parseInt(m[2], 10);
@@ -85,7 +105,9 @@ function advanceTimeString(timeStr, minutes) {
     let   newHours  = hours % 12;
     if (newHours === 0) newHours = 12;
 
-    return `${newHours}:${String(mins).padStart(2, '0')} ${newPeriod}${rest}`;
+    const result = `${newHours}:${String(mins).padStart(2, '0')} ${newPeriod}${rest}`;
+    ttDebug(`advanceTime: "${timeStr}" +${minutes}min → "${result}"`);
+    return result;
 }
 
 // ── Heart-in-message extraction ───────────────────────────────
@@ -267,6 +289,8 @@ function getBestPrevContext(chat, beforeMesId) {
 
     // Find the best available time from raw STTracker data
     const stTime = getMostRecentSTTrackerTime(chat, beforeMesId);
+
+    ttDebug(`getBestPrevCtx before #${beforeMesId}: ttTracker=${ttTracker ? `time="${ttTracker.time}"` : 'null'} stTime=${stTime || 'null'}`);
 
     if (ttTracker) {
         // If tt_tracker has a good time, use it as-is
@@ -503,10 +527,12 @@ function populatePrecedingUserMessages(aiMesId) {
     const ctx = getContext();
     let modified = false;
 
+    ttDebug(`populatePrecedingUser from ai #${aiMesId}`);
+
     for (let i = aiMesId - 1; i >= 0; i--) {
         const msg = ctx.chat[i];
         if (!msg || !msg.is_user) break; // Stop at the previous AI message
-        if (msg.extra?.tt_tracker) continue; // Already has one
+        if (msg.extra?.tt_tracker) { ttDebug(`  #${i} user: already has tracker`); continue; }
 
         // The tracker for a user message is whatever was current before they sent their message,
         // with time advanced by 1–3 minutes so every message has a unique, forward-moving timestamp.
@@ -515,10 +541,13 @@ function populatePrecedingUserMessages(aiMesId) {
             const advancedTracker = { ...tracker };
             const nudge = 1 + Math.floor(Math.random() * 3); // 1–3 minutes
             advancedTracker.time = advanceTimeString(tracker.time, nudge);
+            ttDebug(`  #${i} user: base="${tracker.time}" +${nudge}min → "${advancedTracker.time}"`);
             msg.extra = msg.extra || {};
             msg.extra.tt_tracker = advancedTracker;
             renderMessageTracker(i);
             modified = true;
+        } else {
+            ttDebug(`  #${i} user: no base tracker found`);
         }
     }
 
@@ -537,9 +566,12 @@ function processMessage(mesId) {
     const msg = ctx.chat[mesId];
     if (!msg || msg.is_user) return;
 
+    ttDebug(`processMessage #${mesId} msgLen=${(msg.mes || '').length}`);
+
     // 1. Try our own [TRACKER] format
     const data = parseTrackerBlock(msg.mes || '');
     if (data) {
+        ttDebug(`  #${mesId} [TRACKER] found: time="${data.time}" heart=${data.heart} chars=${data.characters.length}`);
         // Enforce heart shift limit in code — don't trust the AI to respect it
         const maxShift = (Number(s.heartSensitivity) || 5) * 500;
         if (data.heart !== null) {
@@ -560,9 +592,12 @@ function processMessage(mesId) {
         return;
     }
 
+    ttDebug(`  #${mesId} no [TRACKER] block — trying STTracker`);
+
     // 2. Try importing from SillyTavern-Tracker format
     const imported = tryImportSTTracker(msg);
     if (imported) {
+        ttDebug(`  #${mesId} STTracker imported: time="${imported.time}"`);
         msg.extra = msg.extra || {};
         msg.extra.tt_tracker = imported;
         ctx.saveChat();
@@ -570,15 +605,17 @@ function processMessage(mesId) {
         renderMessageTracker(mesId);
         populatePrecedingUserMessages(mesId);
         injectPrompt();
+    } else {
+        ttDebug(`  #${mesId} no tracker data found`);
     }
-}
-
-// ── Regenerate Tracker ────────────────────────────────────────
+} ────────────────────────────────────────
 
 async function regenTracker(mesId) {
     const ctx = getContext();
     const msg = ctx.chat[mesId];
     if (!msg) return;
+
+    ttDebug(`regenTracker #${mesId} is_user=${msg.is_user}`);
 
     const btn = $(`.mes[mesid="${mesId}"] .tt-regen-btn`);
     btn.prop('disabled', true).html('<i class="fa-solid fa-rotate fa-spin"></i> Regenerating…');
@@ -587,10 +624,11 @@ async function regenTracker(mesId) {
         const s        = getSettings();
         const maxShift = (Number(s.heartSensitivity) || 5) * 500;
 
-        const { trackerText: prevTrackerText, prevHeart } = getBestPrevContext(ctx.chat, mesId);
+        const { trackerText: prevTrackerText, prevHeart, prevTime: regenPrevTime } = getBestPrevContext(ctx.chat, mesId);
         const heartLo   = Math.max(0,     prevHeart - maxShift);
         const heartHi   = Math.min(99999, prevHeart + maxShift);
 
+        ttDebug(`  regen #${mesId}: prevHeart=${prevHeart} range=[${heartLo},${heartHi}] prevTime="${regenPrevTime || 'none'}"`);
         let genPrompt;
 
         if (msg.is_user) {
@@ -659,9 +697,8 @@ characters:
         }
 
         const data = parseTrackerBlock(response);
+        ttDebug(`  regen #${mesId}: parsed=${data ? `time="${data.time}" heart=${data.heart}` : 'null (no [TRACKER] block)'}`);
         if (data) {
-            if (msg.is_user) {
-                // Hard lock heart on user messages
                 data.heart = prevHeart;
             } else {
                 if (data.heart !== null) {
@@ -918,6 +955,8 @@ async function populateAllMessages() {
             const heartLocked    = inlineHeart !== null;
             const lockedHeartVal = heartLocked ? Math.max(0, Math.min(99999, inlineHeart)) : null;
 
+            ttDebug(`populate #${idx}: hasTracker=${!!msg.extra?.tt_tracker} hasSTTracker=${!!(msg.tracker && Object.keys(msg.tracker || {}).length)} heartLocked=${heartLocked}${heartLocked ? ` val=${lockedHeartVal}` : ''}`);
+
             // Strip any leftover [TRACKER] text from msg.mes regardless of path
             if ((msg.mes || '').match(/\[TRACKER\]/i)) {
                 msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
@@ -928,6 +967,7 @@ async function populateAllMessages() {
             // Build from it, then AI-fill only what's still blank.
             const stImported = tryImportSTTracker(msg);
             if (stImported) {
+                ttDebug(`  #${idx} P1: STTracker time="${stImported.time}" loc="${stImported.location}"`);
                 // Heart comes from the nearest preceding processed tracker,
                 // since STTracker doesn't track heart.
                 const prevContext = getMostRecentTracker(ctx.chat, idx);
@@ -941,6 +981,7 @@ async function populateAllMessages() {
                 msg.extra.tt_tracker = stImported;
 
                 if (hasBlankFields(stImported)) {
+                    ttDebug(`  #${idx} P1: has blank fields, calling AI fill`);
                     const start       = Math.max(0, idx - 6);
                     const contextMsgs = ctx.chat.slice(start, idx + 1);
                     const contextText = contextMsgs
@@ -966,12 +1007,14 @@ characters:
                     try {
                         const response = await generateQuietPrompt(fillPrompt, false, true);
                         const filled = parseTrackerBlock(response);
+                        ttDebug(`  #${idx} P1 fill: parsed=${filled ? `time="${filled.time}"` : 'null'}`);
                         if (filled) {
                             msg.extra.tt_tracker = mergeTrackers(stImported, filled);
                             if (heartLocked) msg.extra.tt_tracker.heart = lockedHeartVal;
                         }
                     } catch (err) {
                         console.warn(`[TurboTracker] Could not fill blank ST fields for message #${idx}:`, err);
+                        ttDebug(`  #${idx} P1 fill ERROR: ${err.message}`);
                     }
                 }
 
@@ -979,6 +1022,7 @@ characters:
                 if (msg.extra.tt_tracker.heart !== null) {
                     s.heartPoints = parseInt(msg.extra.tt_tracker.heart, 10) || 0;
                 }
+                ttDebug(`  #${idx} P1 done: time="${msg.extra.tt_tracker.time}" heart=${msg.extra.tt_tracker.heart}`);
                 renderMessageTracker(idx);
                 done++;
                 status.text(`${done} / ${aiMessages.length} messages…`);
@@ -987,6 +1031,7 @@ characters:
 
             // ── Priority 2: Already has a tt_tracker (no STTracker on this msg) ──
             if (msg.extra?.tt_tracker) {
+                ttDebug(`  #${idx} P2: existing tt_tracker time="${msg.extra.tt_tracker.time}" heart=${msg.extra.tt_tracker.heart}`);
                 // Inline heart always wins over whatever is stored
                 if (heartLocked) {
                     msg.extra.tt_tracker = { ...msg.extra.tt_tracker, heart: lockedHeartVal };
@@ -996,6 +1041,7 @@ characters:
                 }
 
                 if (hasBlankFields(msg.extra.tt_tracker)) {
+                    ttDebug(`  #${idx} P2: has blank fields, calling AI fill`);
                     const start       = Math.max(0, idx - 6);
                     const contextMsgs = ctx.chat.slice(start, idx + 1);
                     const contextText = contextMsgs
@@ -1021,15 +1067,18 @@ characters:
                     try {
                         const response = await generateQuietPrompt(fillPrompt, false, true);
                         const filled = parseTrackerBlock(response);
+                        ttDebug(`  #${idx} P2 fill: parsed=${filled ? `time="${filled.time}"` : 'null'}`);
                         if (filled) {
                             msg.extra.tt_tracker = mergeTrackers(msg.extra.tt_tracker, filled);
                             if (heartLocked) msg.extra.tt_tracker.heart = lockedHeartVal;
                         }
                     } catch (err) {
                         console.warn(`[TurboTracker] Could not fill blank fields for message #${idx}:`, err);
+                        ttDebug(`  #${idx} P2 fill ERROR: ${err.message}`);
                     }
                 }
 
+                ttDebug(`  #${idx} P2 done: time="${msg.extra.tt_tracker.time}" heart=${msg.extra.tt_tracker.heart}`);
                 renderMessageTracker(idx);
                 done++;
                 status.text(`${done} / ${aiMessages.length} messages…`);
@@ -1039,6 +1088,7 @@ characters:
             // ── Priority 3: Inline [TRACKER] block in message text ────────
             const existing = parseTrackerBlock(msg.mes || '');
             if (existing) {
+                ttDebug(`  #${idx} P3: [TRACKER] in msg.mes time="${existing.time}" heart=${existing.heart}`);
                 if (heartLocked) {
                     existing.heart = lockedHeartVal;
                 } else if (existing.heart !== null) {
@@ -1063,6 +1113,8 @@ characters:
                 .join('\n\n');
 
             const { trackerText: prevTrackerText, prevHeart: populatePrevHeart, prevTime: populatePrevTime } = getBestPrevContext(ctx.chat, idx);
+
+            ttDebug(`  #${idx} P4: AI gen — prevTime="${populatePrevTime || 'none'}" prevHeart=${populatePrevHeart}`);
 
             // Pre-compute the time so the AI cannot drift — advance by 2 minutes from the
             // last known time. The AI can still write a larger jump if the scene warrants it,
@@ -1104,6 +1156,7 @@ characters:
             try {
                 const response = await generateQuietPrompt(genPrompt, false, true);
                 const data = parseTrackerBlock(response);
+                ttDebug(`  #${idx} P4 result: ${data ? `time="${data.time}" heart=${data.heart}` : 'null — retrying'}`);
                 if (data) {
                     if (heartLocked) {
                         data.heart = lockedHeartVal;
@@ -1118,6 +1171,7 @@ characters:
                     // Retry once if the AI didn't produce a parseable tracker block
                     const retry = await generateQuietPrompt(genPrompt, false, true);
                     const retryData = parseTrackerBlock(retry);
+                    ttDebug(`  #${idx} P4 retry: ${retryData ? `time="${retryData.time}"` : 'null (giving up)'}`);
                     if (retryData) {
                         if (heartLocked) {
                             retryData.heart = lockedHeartVal;
@@ -1134,6 +1188,7 @@ characters:
                 }
             } catch (err) {
                 console.warn(`[TurboTracker] Could not generate tracker for message #${idx}:`, err);
+                ttDebug(`  #${idx} P4 ERROR: ${err.message}`);
             }
 
             done++;
@@ -1204,15 +1259,9 @@ function onCharacterMessageRendered(mesId) {
     const msg = ctx.chat[mesId];
     if (!msg) return;
 
-    if (msg.extra?.tt_tracker) {
-        renderMessageTracker(mesId);
-    } else {
-        processMessage(mesId);
-    }
-}
+    ttDebug(`EVENT char_msg_rendered #${mesId} hasTracker=${!!msg.extra?.tt_tracker}`);
 
-/**
- * Fires when a user message is rendered.
+    if (msg.extra?.tt_tracker) {
  * Only renders existing tracker data — user message trackers are applied
  * retroactively by processMessage() after the AI responds.
  */
@@ -1223,6 +1272,8 @@ function onUserMessageRendered(mesId) {
 
     const s = getSettings();
     if (!s.enabled) return;
+
+    ttDebug(`EVENT user_msg_rendered #${mesId} hasTracker=${!!msg.extra?.tt_tracker}`);
 
     // Re-inject the prompt now that the user's message is in chat — this ensures
     // the injected prompt includes the user's latest message as tracker context
@@ -1369,6 +1420,31 @@ function loadSettingsUi() {
                 </button>
             </div>
             <small>Populate: infers tracker data for messages missing it. Regenerate: clears and rebuilds all trackers from scratch.</small>
+
+            <hr class="tt-divider">
+
+            <div class="inline-drawer tt-debug-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header tt-heart-drawer-header">
+                    <b>🔧 Debug Log</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down"></div>
+                </div>
+                <div class="inline-drawer-content tt-debug-drawer-content">
+                    <label class="checkbox_label">
+                        <input type="checkbox" id="tt-debug-enabled" ${s.debugEnabled ? 'checked' : ''}>
+                        <span>Enable debug logging</span>
+                    </label>
+                    <div class="tt-debug-actions">
+                        <button id="tt-debug-copy-btn" class="menu_button menu_button_icon">
+                            <i class="fa-solid fa-copy"></i> Copy Log
+                        </button>
+                        <button id="tt-debug-clear-btn" class="menu_button menu_button_icon">
+                            <i class="fa-solid fa-trash"></i> Clear
+                        </button>
+                    </div>
+                    <textarea id="tt-debug-log" class="tt-debug-log text_pole" readonly rows="10"
+                              placeholder="Enable debug logging, then reproduce the issue…"></textarea>
+                </div>
+            </div>
         </div>
     </div>
 </div>`;
@@ -1415,6 +1491,30 @@ function loadSettingsUi() {
 
     $('#tt-populate-btn').on('click', populateAllMessages);
     $('#tt-regen-all-btn').on('click', regenerateAllTrackers);
+
+    $('#tt-debug-enabled').on('change', function () {
+        getSettings().debugEnabled = this.checked;
+        saveSettingsDebounced();
+        if (!this.checked) return;
+        const $log = $('#tt-debug-log');
+        $log.val(debugLines.join('\n'));
+        if (debugLines.length) $log[0].scrollTop = $log[0].scrollHeight;
+    });
+
+    $('#tt-debug-copy-btn').on('click', function () {
+        const text = debugLines.join('\n');
+        if (!text) return;
+        navigator.clipboard.writeText(text).then(() => {
+            const btn = $(this);
+            btn.html('<i class="fa-solid fa-check"></i> Copied!');
+            setTimeout(() => btn.html('<i class="fa-solid fa-copy"></i> Copy Log'), 2000);
+        });
+    });
+
+    $('#tt-debug-clear-btn').on('click', function () {
+        debugLines.length = 0;
+        $('#tt-debug-log').val('');
+    });
 }
 
 // ── Init ──────────────────────────────────────────────────────
