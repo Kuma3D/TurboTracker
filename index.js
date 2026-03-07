@@ -608,7 +608,9 @@ function processMessage(mesId) {
     } else {
         ttDebug(`  #${mesId} no tracker data found`);
     }
-} ────────────────────────────────────────
+}
+
+// ── Regenerate Tracker ────────────────────────────────────────
 
 async function regenTracker(mesId) {
     const ctx = getContext();
@@ -699,6 +701,8 @@ characters:
         const data = parseTrackerBlock(response);
         ttDebug(`  regen #${mesId}: parsed=${data ? `time="${data.time}" heart=${data.heart}` : 'null (no [TRACKER] block)'}`);
         if (data) {
+            if (msg.is_user) {
+                // Hard lock heart on user messages
                 data.heart = prevHeart;
             } else {
                 if (data.heart !== null) {
@@ -1262,6 +1266,14 @@ function onCharacterMessageRendered(mesId) {
     ttDebug(`EVENT char_msg_rendered #${mesId} hasTracker=${!!msg.extra?.tt_tracker}`);
 
     if (msg.extra?.tt_tracker) {
+        renderMessageTracker(mesId);
+    } else {
+        processMessage(mesId);
+    }
+}
+
+/**
+ * Fires when a user message is rendered.
  * Only renders existing tracker data — user message trackers are applied
  * retroactively by processMessage() after the AI responds.
  */
