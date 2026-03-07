@@ -1190,6 +1190,12 @@ ${prefilledCharsText}
                 const data = parseTrackerBlock(response);
                 ttDebug(`  #${idx} P4 result: ${data ? `time="${data.time}" heart=${data.heart}` : 'null — retrying'}`);
                 if (data) {
+                    // Lock time to our pre-computed advance — AI time is unreliable
+                    // (observed issues: wrong date, multi-hour jumps, going backward)
+                    if (data.time !== prefilledTime) {
+                        ttDebug(`  #${idx} P4: overriding AI time "${data.time}" → "${prefilledTime}"`);
+                    }
+                    data.time = prefilledTime;
                     if (heartLocked) {
                         data.heart = lockedHeartVal;
                     } else if (data.heart !== null) {
@@ -1206,6 +1212,7 @@ ${prefilledCharsText}
                     const retryData = parseTrackerBlock(retry);
                     ttDebug(`  #${idx} P4 retry: ${retryData ? `time="${retryData.time}"` : 'null (giving up)'}`);
                     if (retryData) {
+                        retryData.time = prefilledTime; // Lock time on retry too
                         if (heartLocked) {
                             retryData.heart = lockedHeartVal;
                         } else if (retryData.heart !== null) {
@@ -1245,14 +1252,22 @@ ${prefilledCharsText}
                 continue;
             }
 
-            // Otherwise inherit from the nearest preceding tracker
+            // Otherwise inherit from the nearest preceding tracker, with a small time
+            // nudge so user messages have a unique forward-moving time instead of
+            // duplicating the same timestamp as the preceding AI message.
             const sourceTracker = getMostRecentTracker(ctx.chat, i);
             if (sourceTracker) {
                 const existing = umsg.extra?.tt_tracker;
                 umsg.extra = umsg.extra || {};
-                umsg.extra.tt_tracker = existing
-                    ? { ...existing, heart: sourceTracker.heart }
-                    : { ...sourceTracker };
+                if (existing) {
+                    // Already has a tracker — just sync heart from source, keep its time
+                    umsg.extra.tt_tracker = { ...existing, heart: sourceTracker.heart };
+                } else {
+                    const nudge = 1 + Math.floor(Math.random() * 3); // 1–3 minutes
+                    const nudgedTime = advanceTimeString(sourceTracker.time, nudge);
+                    ttDebug(`  user #${i}: inherited time="${sourceTracker.time}" +${nudge}min → "${nudgedTime}"`);
+                    umsg.extra.tt_tracker = { ...sourceTracker, time: nudgedTime };
+                }
                 renderMessageTracker(i);
             }
         }
