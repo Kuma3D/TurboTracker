@@ -82,32 +82,52 @@ function clampHeart(rawValue, prevHeart, maxShift) {
  */
 function advanceTimeString(timeStr, minutes) {
     if (!timeStr) return timeStr;
+
+    // Format 1: H:MM AM/PM (with optional date suffix)
     const m = timeStr.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)(.*)/i);
-    if (!m) { ttDebug(`advanceTime: no-match for "${timeStr}"`); return timeStr; }
+    if (m) {
+        let hours = parseInt(m[1], 10);
+        let mins  = parseInt(m[2], 10);
+        const period = m[3].toUpperCase();
+        const rest   = m[4];
 
-    let hours = parseInt(m[1], 10);
-    let mins  = parseInt(m[2], 10);
-    const period = m[3].toUpperCase();
-    const rest   = m[4]; // everything after "AM/PM" (date, era, etc.)
+        if (period === 'PM' && hours !== 12) hours += 12;
+        if (period === 'AM' && hours === 12) hours  = 0;
 
-    // Convert to 24-hour
-    if (period === 'PM' && hours !== 12) hours += 12;
-    if (period === 'AM' && hours === 12) hours  = 0;
+        mins  += minutes;
+        hours += Math.floor(mins / 60);
+        mins   = mins  % 60;
+        hours  = hours % 24;
 
-    // Advance
-    mins  += minutes;
-    hours += Math.floor(mins / 60);
-    mins   = mins  % 60;
-    hours  = hours % 24;
+        const newPeriod = hours >= 12 ? 'PM' : 'AM';
+        let   newHours  = hours % 12;
+        if (newHours === 0) newHours = 12;
 
-    // Convert back to 12-hour
-    const newPeriod = hours >= 12 ? 'PM' : 'AM';
-    let   newHours  = hours % 12;
-    if (newHours === 0) newHours = 12;
+        const result = `${newHours}:${String(mins).padStart(2, '0')} ${newPeriod}${rest}`;
+        ttDebug(`advanceTime: "${timeStr}" +${minutes}min → "${result}"`);
+        return result;
+    }
 
-    const result = `${newHours}:${String(mins).padStart(2, '0')} ${newPeriod}${rest}`;
-    ttDebug(`advanceTime: "${timeStr}" +${minutes}min → "${result}"`);
-    return result;
+    // Format 2: HH:MM:SS (24-hour, with optional date suffix)
+    const m2 = timeStr.match(/^(\d{1,2}):(\d{2}):(\d{2})(.*)/);
+    if (m2) {
+        let hours = parseInt(m2[1], 10);
+        let mins  = parseInt(m2[2], 10);
+        const secs = m2[3];
+        const rest = m2[4];
+
+        mins  += minutes;
+        hours += Math.floor(mins / 60);
+        mins   = mins  % 60;
+        hours  = hours % 24;
+
+        const result = `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${secs}${rest}`;
+        ttDebug(`advanceTime: "${timeStr}" +${minutes}min → "${result}"`);
+        return result;
+    }
+
+    ttDebug(`advanceTime: no-match for "${timeStr}"`);
+    return timeStr;
 }
 
 // ── Heart-in-message extraction ───────────────────────────────
@@ -293,12 +313,14 @@ function getBestPrevContext(chat, beforeMesId) {
     ttDebug(`getBestPrevCtx before #${beforeMesId}: ttTracker=${ttTracker ? `time="${ttTracker.time}"` : 'null'} stTime=${stTime || 'null'}`);
 
     if (ttTracker) {
-        // If tt_tracker has a good time, use it as-is
+        // If tt_tracker has a good time, use it as context — but prefer stTime as the
+        // time anchor since it may come from a more recent message (e.g. a user message
+        // with STTracker data that appeared after the last AI tt_tracker).
         if (!isBlankValue(ttTracker.time)) {
             return {
                 trackerText: formatTrackerForPrompt(ttTracker),
                 prevHeart:   parseInt(ttTracker.heart, 10) || 0,
-                prevTime:    ttTracker.time,
+                prevTime:    stTime || ttTracker.time,
             };
         }
         // tt_tracker exists but time is blank — patch it with STTracker time if available
