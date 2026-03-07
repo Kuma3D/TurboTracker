@@ -1022,30 +1022,27 @@ async function populateAllMessages() {
 
                 if (hasBlankFields(stImported)) {
                     ttDebug(`  #${idx} P1: has blank fields, calling AI fill`);
-                    const start       = Math.max(0, idx - 6);
-                    const contextMsgs = ctx.chat.slice(start, idx + 1);
-                    const contextText = contextMsgs
-                        .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
-                        .join('\n\n');
                     const lockedHeart = parseInt(stImported.heart, 10) || 0;
+                    const markV = v => isBlankValue(v) ? '???' : v;
+                    const fillCharsText = (stImported.characters || []).length
+                        ? stImported.characters
+                            .map(c => `- name: ${c.name} | description: ${markV(c.description)} | outfit: ${markV(c.outfit)} | state: ${markV(c.state)} | position: ${markV(c.position)}`)
+                            .join('\n')
+                        : '- name: ??? | description: ??? | outfit: ??? | state: ??? | position: ???';
                     const fillPrompt =
-`[OOC: The tracker below has blank fields marked as ???. Based on the conversation excerpt and character context, fill in ONLY the ??? fields. Do not change any field that already has a value. Output ONLY a complete tracker block — no other text.]
-
-Current tracker (fill in the ??? fields):
-${formatTrackerWithBlanks(stImported)}
-
-${contextText}
+`[OOC: Fill in every ??? in this tracker. Keep all non-??? values exactly as-is. Output ONLY the completed [TRACKER]...[/TRACKER] block — no other text.]
 
 [TRACKER]
-time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
-location: Full location description
-weather: Weather description, Temperature
+time: ${markV(stImported.time)}
+location: ${markV(stImported.location)}
+weather: ${markV(stImported.weather)}
 heart: ${lockedHeart}
 characters:
-- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
+${fillCharsText}
 [/TRACKER]`;
                     try {
                         const response = await generateQuietPrompt(fillPrompt, false, true);
+                        ttDebug(`  #${idx} P1 fill raw: "${response.slice(0, 300).replace(/\n/g, '\\n')}"`);
                         const filled = parseTrackerBlock(response);
                         ttDebug(`  #${idx} P1 fill: parsed=${filled ? `time="${filled.time}"` : 'null'}`);
                         if (filled) {
@@ -1082,30 +1079,28 @@ characters:
 
                 if (hasBlankFields(msg.extra.tt_tracker)) {
                     ttDebug(`  #${idx} P2: has blank fields, calling AI fill`);
-                    const start       = Math.max(0, idx - 6);
-                    const contextMsgs = ctx.chat.slice(start, idx + 1);
-                    const contextText = contextMsgs
-                        .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
-                        .join('\n\n');
                     const lockedHeart = parseInt(msg.extra.tt_tracker.heart, 10) || 0;
+                    const markV = v => isBlankValue(v) ? '???' : v;
+                    const curTracker = msg.extra.tt_tracker;
+                    const fillCharsText = (curTracker.characters || []).length
+                        ? curTracker.characters
+                            .map(c => `- name: ${c.name} | description: ${markV(c.description)} | outfit: ${markV(c.outfit)} | state: ${markV(c.state)} | position: ${markV(c.position)}`)
+                            .join('\n')
+                        : '- name: ??? | description: ??? | outfit: ??? | state: ??? | position: ???';
                     const fillPrompt =
-`[OOC: The tracker below has blank fields marked as ???. Based on the conversation excerpt and character context, fill in ONLY the ??? fields. Do not change any field that already has a value. Output ONLY a complete tracker block — no other text.]
-
-Current tracker (fill in the ??? fields):
-${formatTrackerWithBlanks(msg.extra.tt_tracker)}
-
-${contextText}
+`[OOC: Fill in every ??? in this tracker. Keep all non-??? values exactly as-is. Output ONLY the completed [TRACKER]...[/TRACKER] block — no other text.]
 
 [TRACKER]
-time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
-location: Full location description
-weather: Weather description, Temperature
+time: ${markV(curTracker.time)}
+location: ${markV(curTracker.location)}
+weather: ${markV(curTracker.weather)}
 heart: ${lockedHeart}
 characters:
-- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
+${fillCharsText}
 [/TRACKER]`;
                     try {
                         const response = await generateQuietPrompt(fillPrompt, false, true);
+                        ttDebug(`  #${idx} P2 fill raw: "${response.slice(0, 300).replace(/\n/g, '\\n')}"`);
                         const filled = parseTrackerBlock(response);
                         ttDebug(`  #${idx} P2 fill: parsed=${filled ? `time="${filled.time}"` : 'null'}`);
                         if (filled) {
@@ -1146,25 +1141,19 @@ characters:
             }
 
             // ── Priority 4: Ask the AI ────────────────────────────────────
-            const start       = Math.max(0, idx - 6);
-            const contextMsgs = ctx.chat.slice(start, idx + 1);
-            const contextText = contextMsgs
-                .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
-                .join('\n\n');
-
             const { trackerText: prevTrackerText, prevHeart: populatePrevHeart, prevTime: populatePrevTime } = getBestPrevContext(ctx.chat, idx);
+            const prevTrackerObj = getMostRecentTracker(ctx.chat, idx);
 
             ttDebug(`  #${idx} P4: AI gen — prevTime="${populatePrevTime || 'none'}" prevHeart=${populatePrevHeart}`);
 
-            // Pre-compute the time so the AI cannot drift — advance by 2 minutes from the
-            // last known time. The AI can still write a larger jump if the scene warrants it,
-            // but this gives a concrete anchor so it doesn't invent times from whole cloth.
-            const computedTime = populatePrevTime ? advanceTimeString(populatePrevTime, 2) : null;
-            const timeAnchor   = computedTime
-                ? `The previous time was "${populatePrevTime}". Advance it by a realistic amount for what the scene depicts — for a normal brief exchange this is 1–5 minutes. Do NOT jump hours unless the scene explicitly describes a major time skip.`
-                : `No previous time exists — invent one that fits the story's setting and keep it consistent going forward.`;
+            // Pre-compute the time anchor and build a pre-filled template so the AI
+            // needs only to validate/update values rather than generate content from scratch.
+            // Sending a blank template alongside conversation context was causing the AI to
+            // continue the roleplay instead of outputting a structured tracker block.
+            const computedTime  = populatePrevTime ? advanceTimeString(populatePrevTime, 2) : null;
+            const prefilledTime = computedTime || populatePrevTime || 'h:MM AM/PM; MM/DD/YYYY (DayOfWeek)';
 
-            const populateMaxShift  = (Number(s.heartSensitivity) || 5) * 500;
+            const populateMaxShift = (Number(s.heartSensitivity) || 5) * 500;
 
             const populateHeartLo = heartLocked ? lockedHeartVal : Math.max(0,     populatePrevHeart - populateMaxShift);
             const populateHeartHi = heartLocked ? lockedHeartVal : Math.min(99999, populatePrevHeart + populateMaxShift);
@@ -1173,24 +1162,26 @@ characters:
                 ? `heart must be exactly ${lockedHeartVal} — extracted directly from the message text.`
                 : `heart must be between ${populateHeartLo} and ${populateHeartHi} (previous value was ${populatePrevHeart}).`;
 
+            const prefilledLocation  = prevTrackerObj?.location || 'Unknown';
+            const prefilledWeather   = prevTrackerObj?.weather  || 'Unknown';
+            // Carry forward name/description/outfit but mark state/position as ??? —
+            // those are the fields most likely to change each message.
+            const prefilledCharsText = (prevTrackerObj?.characters?.length)
+                ? prevTrackerObj.characters
+                    .map(c => `- name: ${c.name} | description: ${c.description || '???'} | outfit: ${c.outfit || '???'} | state: ??? | position: ???`)
+                    .join('\n')
+                : `- name: CharacterName | description: Physical description | outfit: Clothing | state: Emotional state | position: Position`;
+
             const genPrompt =
-`[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
-
-TIME: IN-STORY fiction time only — NEVER the real-world current date or time. ${timeAnchor}
-${heartInstruction}]
-
-Previous tracker state:
-${prevTrackerText}
-
-${contextText}
+`[OOC: Complete this scene tracker for the current story moment. Update only what the narrative requires; keep all other pre-filled values. Time is pre-calculated — override only if the scene depicts a clear time jump. ${heartInstruction} Output ONLY the [TRACKER]...[/TRACKER] block — no story text, no dialogue, nothing else.]
 
 [TRACKER]
-time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
-location: Full location description
-weather: Weather description, Temperature
+time: ${prefilledTime}
+location: ${prefilledLocation}
+weather: ${prefilledWeather}
 heart: ${heartLocked ? lockedHeartVal : `integer_value between ${populateHeartLo} and ${populateHeartHi}`}
 characters:
-- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
+${prefilledCharsText}
 [/TRACKER]`;
 
             try {
