@@ -80,8 +80,7 @@ function clampHeart(rawValue, prevHeart, maxShift) {
  * Leaves the date/era suffix (e.g. "; 01/20/31 BBY (Monday)") unchanged.
  * If the format isn't recognised, the original string is returned unmodified.
  */
-function advanceTimeString(timeStr, minutes) {
-    if (!timeStr) return timeStr;
+function advanceTimeString(timeStr, minutes) {    if (!timeStr) return timeStr;
 
     // Format 1: H:MM AM/PM (with optional date suffix)
     const m = timeStr.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)(.*)/i);
@@ -128,6 +127,20 @@ function advanceTimeString(timeStr, minutes) {
 
     ttDebug(`advanceTime: no-match for "${timeStr}"`);
     return timeStr;
+}
+
+/**
+ * Parse a time field value that the AI returned as a minute offset.
+ * Accepts plain integers or "N minutes" / "N min" formats.
+ * Returns the integer if valid (1–1440 minutes), or null if it looks like
+ * a real clock time or anything else we can't use as a minute count.
+ */
+function parseMinuteOffset(val) {
+    if (!val) return null;
+    const m = String(val).trim().match(/^(\d+)\s*(?:minutes?|min|m)?$/i);
+    if (!m) return null;
+    const n = parseInt(m[1], 10);
+    return (n >= 1 && n <= 1440) ? n : null;
 }
 
 // ── Heart-in-message extraction ───────────────────────────────
@@ -1173,10 +1186,10 @@ ${fillCharsText}
                 : `- name: CharacterName | description: Physical description | outfit: Clothing | state: Emotional state | position: Position`;
 
             const genPrompt =
-`[OOC: Complete this scene tracker for the current story moment. Update only what the narrative requires; keep all other pre-filled values. Time is pre-calculated — override only if the scene depicts a clear time jump. ${heartInstruction} Output ONLY the [TRACKER]...[/TRACKER] block — no story text, no dialogue, nothing else.]
+`[OOC: Complete this scene tracker. Fill each field based on the current story moment. For the "time" field, output ONLY an integer — the number of in-story minutes that pass during this exchange. Examples: brief back-and-forth dialogue = 1-5 min, moving to a nearby location = 5-15 min, a longer journey = 15-60 min. Do NOT output a clock time. ${heartInstruction} Output ONLY the [TRACKER]...[/TRACKER] block — no story text, no dialogue, nothing else.]
 
 [TRACKER]
-time: ${prefilledTime}
+time: [integer minutes elapsed, e.g. 3]
 location: ${prefilledLocation}
 weather: ${prefilledWeather}
 heart: ${heartLocked ? lockedHeartVal : `integer_value between ${populateHeartLo} and ${populateHeartHi}`}
@@ -1190,12 +1203,18 @@ ${prefilledCharsText}
                 const data = parseTrackerBlock(response);
                 ttDebug(`  #${idx} P4 result: ${data ? `time="${data.time}" heart=${data.heart}` : 'null — retrying'}`);
                 if (data) {
-                    // Lock time to our pre-computed advance — AI time is unreliable
-                    // (observed issues: wrong date, multi-hour jumps, going backward)
-                    if (data.time !== prefilledTime) {
-                        ttDebug(`  #${idx} P4: overriding AI time "${data.time}" → "${prefilledTime}"`);
+                    // Convert time from minute offset to absolute time string.
+                    // Fall back to our pre-computed 2-min advance if AI didn't output a number.
+                    const aiMins = parseMinuteOffset(data.time);
+                    if (aiMins !== null && populatePrevTime) {
+                        data.time = advanceTimeString(populatePrevTime, aiMins);
+                        ttDebug(`  #${idx} P4: AI minutes=${aiMins} → "${data.time}"`);
+                    } else {
+                        if (data.time !== prefilledTime) {
+                            ttDebug(`  #${idx} P4: overriding AI time "${data.time}" → "${prefilledTime}"`);
+                        }
+                        data.time = prefilledTime;
                     }
-                    data.time = prefilledTime;
                     if (heartLocked) {
                         data.heart = lockedHeartVal;
                     } else if (data.heart !== null) {
@@ -1212,7 +1231,12 @@ ${prefilledCharsText}
                     const retryData = parseTrackerBlock(retry);
                     ttDebug(`  #${idx} P4 retry: ${retryData ? `time="${retryData.time}"` : 'null (giving up)'}`);
                     if (retryData) {
-                        retryData.time = prefilledTime; // Lock time on retry too
+                        const retryMins = parseMinuteOffset(retryData.time);
+                        if (retryMins !== null && populatePrevTime) {
+                            retryData.time = advanceTimeString(populatePrevTime, retryMins);
+                        } else {
+                            retryData.time = prefilledTime;
+                        }
                         if (heartLocked) {
                             retryData.heart = lockedHeartVal;
                         } else if (retryData.heart !== null) {
@@ -1263,7 +1287,7 @@ ${prefilledCharsText}
                     // Already has a tracker — just sync heart from source, keep its time
                     umsg.extra.tt_tracker = { ...existing, heart: sourceTracker.heart };
                 } else {
-                    const nudge = 1 + Math.floor(Math.random() * 3); // 1–3 minutes
+                    const nudge = 1; // exactly 1 min — keeps user msg strictly before the following AI message
                     const nudgedTime = advanceTimeString(sourceTracker.time, nudge);
                     ttDebug(`  user #${i}: inherited time="${sourceTracker.time}" +${nudge}min → "${nudgedTime}"`);
                     umsg.extra.tt_tracker = { ...sourceTracker, time: nudgedTime };
