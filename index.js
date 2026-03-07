@@ -300,43 +300,57 @@ function getMostRecentSTTrackerTime(chat, beforeMesId) {
 
 /**
  * Returns { trackerText, prevHeart, prevTime } for use in generation prompts.
- * Prefers an existing tt_tracker as the base, but if its time is blank/unknown
- * it supplements it with the nearest raw STTracker time found scanning backwards.
- * If no tt_tracker exists at all, attempts to build a minimal context from STTracker data.
+ * Compares the message index of the nearest tt_tracker vs the nearest raw STTracker
+ * time to determine which is more recent, and uses that as the time anchor.
+ * This prevents stale STTracker times (from earlier messages) from overriding
+ * a more recent AI-generated tracker time, while still using STTracker times
+ * when they come from a message that appeared after the last tt_tracker.
  */
 function getBestPrevContext(chat, beforeMesId) {
-    const ttTracker = getMostRecentTracker(chat, beforeMesId);
+    // Find the most recent tt_tracker and the message index it came from
+    let ttTracker = null;
+    let ttIdx = -1;
+    for (let i = beforeMesId - 1; i >= 0; i--) {
+        if (chat[i]?.extra?.tt_tracker) {
+            ttTracker = chat[i].extra.tt_tracker;
+            ttIdx = i;
+            break;
+        }
+    }
 
-    // Find the best available time from raw STTracker data
-    const stTime = getMostRecentSTTrackerTime(chat, beforeMesId);
+    // Find the most recent raw STTracker time and the message index it came from
+    let stTime = null;
+    let stIdx = -1;
+    for (let i = beforeMesId - 1; i >= 0; i--) {
+        const t = chat[i]?.tracker;
+        if (t && typeof t === 'object') {
+            const time = t.Time || t.time;
+            if (time) { stTime = String(time); stIdx = i; break; }
+        }
+    }
 
-    ttDebug(`getBestPrevCtx before #${beforeMesId}: ttTracker=${ttTracker ? `time="${ttTracker.time}"` : 'null'} stTime=${stTime || 'null'}`);
+    ttDebug(`getBestPrevCtx before #${beforeMesId}: ttIdx=${ttIdx}${ttTracker ? ` time="${ttTracker.time}"` : ''} stIdx=${stIdx} stTime=${stTime || 'null'}`);
+
+    // Choose the time anchor: use whichever source comes from a MORE RECENT message.
+    // stTime wins only if its message appears AFTER the tt_tracker message.
+    // This avoids old STTracker times overriding newer AI-generated tracker times.
+    const prevTime = (stIdx > ttIdx && stTime) ? stTime
+                   : (!isBlankValue(ttTracker?.time)) ? ttTracker.time
+                   : stTime || null;
 
     if (ttTracker) {
-        // If tt_tracker has a good time, use it as context — but prefer stTime as the
-        // time anchor since it may come from a more recent message (e.g. a user message
-        // with STTracker data that appeared after the last AI tt_tracker).
-        if (!isBlankValue(ttTracker.time)) {
-            return {
-                trackerText: formatTrackerForPrompt(ttTracker),
-                prevHeart:   parseInt(ttTracker.heart, 10) || 0,
-                prevTime:    stTime || ttTracker.time,
-            };
-        }
-        // tt_tracker exists but time is blank — patch it with STTracker time if available
-        const patchedTime = stTime || ttTracker.time;
-        const patched = { ...ttTracker, time: patchedTime };
+        // Patch the tracker with prevTime if its own time is blank
+        const patched = !isBlankValue(ttTracker.time) ? ttTracker : { ...ttTracker, time: prevTime };
         return {
             trackerText: formatTrackerForPrompt(patched),
             prevHeart:   parseInt(ttTracker.heart, 10) || 0,
-            prevTime:    patchedTime || null,
+            prevTime,
         };
     }
 
-    // No tt_tracker at all — try to build context from raw STTracker data
+    // No tt_tracker at all — build minimal context from raw STTracker data
     if (stTime) {
         const synth = { time: stTime, location: null, weather: null, heart: 0, characters: [] };
-        // Also scan for the nearest full STTracker object for other fields
         for (let i = beforeMesId - 1; i >= 0; i--) {
             const t = chat[i]?.tracker;
             if (t && typeof t === 'object' && Object.keys(t).length > 0) {
@@ -1181,6 +1195,7 @@ characters:
 
             try {
                 const response = await generateQuietPrompt(genPrompt, false, true);
+                ttDebug(`  #${idx} P4 raw: "${response.slice(0, 400).replace(/\n/g, '\\n')}"`);
                 const data = parseTrackerBlock(response);
                 ttDebug(`  #${idx} P4 result: ${data ? `time="${data.time}" heart=${data.heart}` : 'null — retrying'}`);
                 if (data) {
@@ -1196,6 +1211,7 @@ characters:
                 } else {
                     // Retry once if the AI didn't produce a parseable tracker block
                     const retry = await generateQuietPrompt(genPrompt, false, true);
+                    ttDebug(`  #${idx} P4 retry raw: "${retry.slice(0, 400).replace(/\n/g, '\\n')}"`);
                     const retryData = parseTrackerBlock(retry);
                     ttDebug(`  #${idx} P4 retry: ${retryData ? `time="${retryData.time}"` : 'null (giving up)'}`);
                     if (retryData) {
