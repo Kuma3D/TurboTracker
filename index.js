@@ -156,20 +156,21 @@ function parseMinuteOffset(val) {
  */
 function estimateMinutesFromContent(text) {
     const t = (text || '').toLowerCase();
+    const r = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
     if (/\b(hours?\s+later|next\s+(?:day|morning|afternoon|evening|night)|the\s+following\s+(?:day|morning)|woke?\s+up|fell\s+asleep|overnight|days?\s+later)\b/.test(t)) {
-        return 90;
+        return r(60, 90);
     }
     if (/\b(walk(?:ed|s|ing)|ran\b|running|arriv(?:ed|es|ing)|depart(?:ed)|left\s+(?:the|a|her|his|their|your)\b|head(?:ed|ing)\s+(?:to\b|towards?\b|for\b|back\b)|travel(?:led|ing)?|drove\b|driv(?:es|ing)|riding|climb(?:ed|ing)|descend(?:ed|ing)|jogg(?:ed|ing)|march(?:ed|ing)|stroll(?:ed|ing)|wander(?:ed|ing))\b/.test(t)) {
-        return 10;
+        return r(8, 15);
     }
     if (/\b(eat(?:ing|s|en)?|meal\b|dinner\b|lunch\b|breakfast\b|drink(?:ing)?|bath(?:ing)?|shower(?:ing)?|dress(?:ed|ing)\b|chang(?:ed|ing)\s+(?:into|out|clothes?)|groom(?:ing)?|cook(?:ing)?|prepar(?:ed|ing))\b/.test(t)) {
-        return 15;
+        return r(12, 20);
     }
-    // Default: scale by length — longer exchanges take more in-story time
-    if (t.length > 600) return 5;
-    if (t.length > 300) return 4;
-    return 3;
+    // Default: scale by message length, with random variance in the 2-10 range
+    if (t.length > 600) return r(5, 10);
+    if (t.length > 300) return r(3, 8);
+    return r(2, 6);
 }
 
 // ── Heart-in-message extraction ───────────────────────────────
@@ -1202,14 +1203,15 @@ ${fillCharsText}
             let advanceMinutes = null;
             if (populatePrevTime) {
                 const minutePrompt =
-`[OOC: How many in-story minutes pass during the following story excerpt? Reply with ONLY a single integer. Examples: brief dialogue exchange = 1-5, moving to a nearby location = 5-15, a longer journey = 15-60, a large time skip = 60+. No other text — just the integer.]
+`[OOC: How many in-story minutes pass during the following story excerpt? Reply with ONLY a single integer. Minimum is 2. Examples: brief dialogue exchange = 2-6, moving to a nearby location = 8-15, a longer journey = 15-60, a large time skip = 60+. No other text — just the integer.]
 ${msg.mes.slice(0, 600)}`;
                 try {
                     const minuteResp = await generateQuietPrompt(minutePrompt, false, true);
                     // Extract the first 1-4 digit number we can find in the response
                     const firstNum = minuteResp.trim().match(/\b(\d{1,4})\b/);
                     const rawNum   = firstNum ? parseInt(firstNum[1], 10) : null;
-                    advanceMinutes = (rawNum !== null && rawNum >= 1 && rawNum <= 1440) ? rawNum : null;
+                    // Clamp to minimum 2 — 1 minute is reserved for user-message nudges only
+                    advanceMinutes = (rawNum !== null && rawNum >= 2 && rawNum <= 1440) ? rawNum : null;
                     ttDebug(`  #${idx} P4 step1 raw: "${minuteResp.slice(0, 80).replace(/\n/g, '\\n')}" → minutes=${advanceMinutes}`);
                 } catch (err) {
                     ttDebug(`  #${idx} P4 step1 ERROR: ${err.message}`);
