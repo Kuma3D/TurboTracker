@@ -618,7 +618,7 @@ function populatePrecedingUserMessages(aiMesId) {
         const tracker = getMostRecentTracker(ctx.chat, i);
         if (tracker) {
             const advancedTracker = { ...tracker };
-            const nudge = 1; // exactly 1 min — keeps user messages strictly before the following AI message
+            const nudge = 1 + Math.floor(Math.random() * 3); // 1–3 min variance
             advancedTracker.time = advanceTimeString(tracker.time, nudge);
             ttDebug(`  #${i} user: base="${tracker.time}" +${nudge}min → "${advancedTracker.time}"`);
             msg.extra = msg.extra || {};
@@ -1339,7 +1339,7 @@ ${prefilledCharsText}
                     // Already has a tracker — just sync heart from source, keep its time
                     umsg.extra.tt_tracker = { ...existing, heart: sourceTracker.heart };
                 } else {
-                    const nudge = 1; // exactly 1 min — keeps user msg strictly before the following AI message
+                    const nudge = 1 + Math.floor(Math.random() * 3); // 1–3 min variance
                     const nudgedTime = advanceTimeString(sourceTracker.time, nudge);
                     ttDebug(`  user #${i}: inherited time="${sourceTracker.time}" +${nudge}min → "${nudgedTime}"`);
                     umsg.extra.tt_tracker = { ...sourceTracker, time: nudgedTime };
