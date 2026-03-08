@@ -711,13 +711,21 @@ async function regenTracker(mesId) {
 
         ttDebug(`  regen #${mesId}: prevHeart=${prevHeart} range=[${heartLo},${heartHi}] prevTime="${regenPrevTime || 'none'}"`);
         let genPrompt;
+        let regenNudge    = 0;
+        let regenUserTime = null;
 
         if (msg.is_user) {
-            // User message: infer scene changes from the user's text; lock heart to previous value
+            // User message: compute time ourselves (prev + 2-5 min) — never let the AI set it.
+            regenNudge    = 2 + Math.floor(Math.random() * 4); // 2–5 min
+            regenUserTime = regenPrevTime
+                ? advanceTimeString(regenPrevTime, regenNudge)
+                : 'h:MM AM/PM; MM/DD/YYYY (DayOfWeek)';
+            ttDebug(`  regen #${mesId} user: prevTime="${regenPrevTime}" +${regenNudge}min → "${regenUserTime}"`);
+
             genPrompt =
 `[OOC: Based on the user's message below and the previous tracker state, produce an updated tracker reflecting any scene changes the user's message logically implies. Output ONLY the tracker block — no other text.
 
-IMPORTANT: The time field is in-story fiction time, NOT real-world time. Advance only by a realistic amount for what the message depicts.
+The time is already set — do NOT change it.
 heart must remain exactly ${prevHeart} — only the character's emotions change this, never the user.]
 
 Previous tracker state:
@@ -727,7 +735,7 @@ User's message:
 ${msg.mes}
 
 [TRACKER]
-time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
+time: ${regenUserTime}
 location: Full location description
 weather: Weather description, Temperature
 heart: ${prevHeart}
@@ -781,8 +789,9 @@ characters:
         ttDebug(`  regen #${mesId}: parsed=${data ? `time="${data.time}" heart=${data.heart}` : 'null (no [TRACKER] block)'}`);
         if (data) {
             if (msg.is_user) {
-                // Hard lock heart on user messages
+                // Hard lock heart and time on user messages — we computed both, AI must not override them
                 data.heart = prevHeart;
+                if (regenPrevTime) data.time = advanceTimeString(regenPrevTime, regenNudge);
             } else {
                 if (data.heart !== null) {
                     // Clamp against prevHeart (the historical baseline), NOT s.heartPoints
