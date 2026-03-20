@@ -1417,6 +1417,19 @@ function onUserMessageRendered(mesId) {
 
     ttDebug(`EVENT user_msg_rendered #${mesId} hasTracker=${!!msg.extra?.tt_tracker}`);
 
+    // Strip any [TRACKER] block the AI may have appended to an impersonated user
+    // message. Without this, the AI sees a stale tracker in the user turn and uses
+    // it as a baseline instead of the correct prior-message tracker.
+    if ((msg.mes || '').match(/\[TRACKER\]/i)) {
+        msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
+        const mesText = $(`.mes[mesid="${mesId}"] .mes_text`);
+        if (mesText.length) {
+            mesText.html(mesText.html().replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim());
+        }
+        ctx.saveChat();
+        ttDebug(`  #${mesId} user: stripped [TRACKER] block from impersonated message`);
+    }
+
     // Re-inject the prompt now that the user's message is in chat — this ensures
     // the injected prompt includes the user's latest message as tracker context
     // before the AI begins generating its response.
@@ -1452,12 +1465,13 @@ function onChatChanged() {
 
     let modified = false;
     ctx.chat.forEach((msg, idx) => {
+        // Clean up any lingering [TRACKER] text in msg.mes — covers both AI messages
+        // that weren't stripped at render time and impersonated user messages.
+        if ((msg.mes || '').match(/\[TRACKER\]/i)) {
+            msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
+            modified = true;
+        }
         if (msg.extra?.tt_tracker) {
-            // Clean up any lingering [TRACKER] text in msg.mes
-            if (!msg.is_user && (msg.mes || '').match(/\[TRACKER\]/i)) {
-                msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
-                modified = true;
-            }
             renderMessageTracker(idx);
         }
     });
