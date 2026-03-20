@@ -1413,46 +1413,41 @@ function onGenerationStarted(type) {
     const s = getSettings();
     if (!s.enabled) return;
 
+    ttDebug(`GENERATION_STARTED type="${type}"`);
+
     if (type === 'impersonate') {
         setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
-        ttDebug('Impersonation started — TT prompt suppressed to prevent [TRACKER] injection');
+        ttDebug('  → Impersonation — TT prompt suppressed');
         return;
     }
 
-    if (type === 'swipe') {
-        // The last AI message is being replaced. Re-inject the prompt using the
-        // tracker from BEFORE that message so the AI doesn't keep compounding
-        // the previous swipe's result as its new baseline.
-        const ctx = getContext();
-        const chat = ctx?.chat || [];
+    // When the last message in chat is an AI message, we are swiping/regenerating it.
+    // Re-inject the prompt using the baseline from BEFORE that message so the AI
+    // doesn't compound the previous swipe's result.
+    const ctx = getContext();
+    const chat = ctx?.chat || [];
+    const lastMsg = chat[chat.length - 1];
+    if (!lastMsg || lastMsg.is_user) return; // Normal new generation — leave prompt alone
 
-        let lastAiIdx = -1;
-        for (let i = chat.length - 1; i >= 0; i--) {
-            if (!chat[i].is_user) { lastAiIdx = i; break; }
-        }
+    const lastAiIdx = chat.length - 1;
+    if (!chat[lastAiIdx].extra?.tt_tracker) return; // No prior swipe data yet — nothing to undo
 
-        if (lastAiIdx < 0 || !chat[lastAiIdx].extra?.tt_tracker) return;
+    const savedTracker = chat[lastAiIdx].extra.tt_tracker;
+    chat[lastAiIdx].extra.tt_tracker = null;
 
-        // Temporarily hide the last AI message's tracker so injectPrompt scans
-        // back to the correct prior baseline.
-        const savedTracker = chat[lastAiIdx].extra.tt_tracker;
-        chat[lastAiIdx].extra.tt_tracker = null;
-
-        // Revert heartPoints to the value before the last AI response.
-        let prevHeart = s.defaultHeartValue || 0;
-        for (let i = lastAiIdx - 1; i >= 0; i--) {
-            const h = chat[i]?.extra?.tt_tracker?.heart;
-            if (h != null) { prevHeart = parseInt(h, 10) || 0; break; }
-        }
-        s.heartPoints = prevHeart;
-
-        injectPrompt();
-
-        // Restore — injectPrompt is synchronous so this is safe.
-        chat[lastAiIdx].extra.tt_tracker = savedTracker;
-
-        ttDebug(`Swipe started — re-injected prompt with pre-#${lastAiIdx} baseline, heart=${prevHeart}`);
+    let prevHeart = s.defaultHeartValue || 0;
+    for (let i = lastAiIdx - 1; i >= 0; i--) {
+        const h = chat[i]?.extra?.tt_tracker?.heart;
+        if (h != null) { prevHeart = parseInt(h, 10) || 0; break; }
     }
+    s.heartPoints = prevHeart;
+
+    injectPrompt();
+
+    // Restore — injectPrompt is synchronous so this is safe.
+    chat[lastAiIdx].extra.tt_tracker = savedTracker;
+
+    ttDebug(`  → Regen detected — re-injected prompt with pre-#${lastAiIdx} baseline, heart=${prevHeart}`);
 }
 
 /**
