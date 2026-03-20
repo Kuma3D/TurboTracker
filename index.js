@@ -677,6 +677,12 @@ function processMessage(mesId) {
     const imported = tryImportSTTracker(msg);
     if (imported) {
         ttDebug(`  #${mesId} STTracker imported: time="${imported.time}"`);
+        // ST-Tracker doesn't include heart — carry the current baseline forward so
+        // the heart meter doesn't silently reset to 0.
+        if (imported.heart === null || imported.heart === undefined) {
+            imported.heart = s.heartPoints;
+        }
+        s.heartPoints = parseInt(imported.heart, 10) || 0;
         msg.extra = msg.extra || {};
         msg.extra.tt_tracker = imported;
         ctx.saveChat();
@@ -965,6 +971,7 @@ const isBlankValue = v => v == null || String(v).trim() === '' || String(v).trim
 
 function hasBlankFields(tracker) {
     if (isBlankValue(tracker.time) || isBlankValue(tracker.location) || isBlankValue(tracker.weather)) return true;
+    if (tracker.heart === null || tracker.heart === undefined) return true;
     for (const c of (tracker.characters || [])) {
         if (!c.description || !c.outfit || !c.state || !c.position) return true;
     }
@@ -973,7 +980,8 @@ function hasBlankFields(tracker) {
 
 function formatTrackerWithBlanks(tracker) {
     const mark = v => isBlankValue(v) ? '???' : v;
-    let text = `time: ${mark(tracker.time)}\nlocation: ${mark(tracker.location)}\nweather: ${mark(tracker.weather)}\nheart: ${parseInt(tracker.heart, 10) || 0}`;
+    const heartStr = (tracker.heart === null || tracker.heart === undefined) ? '???' : (parseInt(tracker.heart, 10) || 0);
+    let text = `time: ${mark(tracker.time)}\nlocation: ${mark(tracker.location)}\nweather: ${mark(tracker.weather)}\nheart: ${heartStr}`;
     if (tracker.characters && tracker.characters.length > 0) {
         text += '\ncharacters:';
         for (const c of tracker.characters) {
@@ -1003,7 +1011,7 @@ function mergeTrackers(existing, filled) {
         time:       isBlankValue(existing.time)     && filled.time     ? filled.time     : existing.time,
         location:   isBlankValue(existing.location) && filled.location ? filled.location : existing.location,
         weather:    isBlankValue(existing.weather)  && filled.weather  ? filled.weather  : existing.weather,
-        heart:      existing.heart, // never overwrite heart retroactively
+        heart:      (existing.heart !== null && existing.heart !== undefined) ? existing.heart : filled.heart,
         characters: [...mergedChars, ...newChars],
     };
 }
@@ -1076,7 +1084,9 @@ async function populateAllMessages() {
 
                 if (hasBlankFields(stImported)) {
                     ttDebug(`  #${idx} P1: has blank fields, calling AI fill`);
-                    const lockedHeart = parseInt(stImported.heart, 10) || 0;
+                    const heartFill = heartLocked ? lockedHeartVal
+                                    : (stImported.heart === null || stImported.heart === undefined) ? '???'
+                                    : parseInt(stImported.heart, 10) || 0;
                     const markV = v => isBlankValue(v) ? '???' : v;
                     const fillCharsText = (stImported.characters || []).length
                         ? stImported.characters
@@ -1090,7 +1100,7 @@ async function populateAllMessages() {
 time: ${markV(stImported.time)}
 location: ${markV(stImported.location)}
 weather: ${markV(stImported.weather)}
-heart: ${lockedHeart}
+heart: ${heartFill}
 characters:
 ${fillCharsText}
 [/TRACKER]`;
@@ -1133,9 +1143,11 @@ ${fillCharsText}
 
                 if (hasBlankFields(msg.extra.tt_tracker)) {
                     ttDebug(`  #${idx} P2: has blank fields, calling AI fill`);
-                    const lockedHeart = parseInt(msg.extra.tt_tracker.heart, 10) || 0;
-                    const markV = v => isBlankValue(v) ? '???' : v;
                     const curTracker = msg.extra.tt_tracker;
+                    const heartFill = heartLocked ? lockedHeartVal
+                                    : (curTracker.heart === null || curTracker.heart === undefined) ? '???'
+                                    : parseInt(curTracker.heart, 10) || 0;
+                    const markV = v => isBlankValue(v) ? '???' : v;
                     const fillCharsText = (curTracker.characters || []).length
                         ? curTracker.characters
                             .map(c => `- name: ${c.name} | description: ${markV(c.description)} | outfit: ${markV(c.outfit)} | state: ${markV(c.state)} | position: ${markV(c.position)}`)
@@ -1148,7 +1160,7 @@ ${fillCharsText}
 time: ${markV(curTracker.time)}
 location: ${markV(curTracker.location)}
 weather: ${markV(curTracker.weather)}
-heart: ${lockedHeart}
+heart: ${heartFill}
 characters:
 ${fillCharsText}
 [/TRACKER]`;
