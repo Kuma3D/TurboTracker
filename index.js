@@ -752,12 +752,12 @@ characters:
                 .join('\n\n');
 
             genPrompt =
-`[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. The "Previous tracker state" below is your ONLY authoritative baseline — ignore any other tracker context or current-state instructions. Update only what the narrative logically requires. Output ONLY the tracker block — no other text.
+`[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
 
-IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Advance from the Previous tracker state's time by the realistic amount the scene depicts — typically 1–10 minutes for a brief exchange, more only if the scene explicitly shows a significant time skip. Do NOT jump hours without clear story justification.
+IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance by only a small, realistic amount — typically 1 to 10 minutes for a normal exchange, only more if the scene explicitly depicts a significant time skip. Do not jump hours without clear story justification.
 heart must be between ${heartLo} and ${heartHi} (previous value was ${prevHeart}).]
 
-Previous tracker state (your baseline — start here):
+Previous tracker state:
 ${prevTrackerText}
 
 ${contextText}
@@ -798,22 +798,14 @@ characters:
                     // (current latest value) — otherwise we'd be constraining relative to
                     // a future state that didn't exist at the time of this message.
                     data.heart = clampHeart(data.heart, prevHeart, maxShift);
+                    s.heartPoints = data.heart;
                 }
             }
             msg.extra = msg.extra || {};
             msg.extra.tt_tracker = data;
-            // Sync heartPoints from the most recent tracker in the entire chat so that
-            // regenerating a historical message doesn't reset the current heart state.
-            let latestHeart = s.defaultHeartValue || 0;
-            for (let j = ctx.chat.length - 1; j >= 0; j--) {
-                const h = ctx.chat[j]?.extra?.tt_tracker?.heart;
-                if (h != null) { latestHeart = parseInt(h, 10) || 0; break; }
-            }
-            s.heartPoints = latestHeart;
             await ctx.saveChat();
             saveSettingsDebounced();
             renderMessageTracker(mesId);
-            injectPrompt(); // re-inject after tracker is saved so system prompt reflects correct state
         }
     } catch (err) {
         console.warn(`[TurboTracker] Regen failed for message #${mesId}:`, err);
