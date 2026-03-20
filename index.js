@@ -899,7 +899,7 @@ function injectPrompt(includeLatestUserMsg = true) {
         }
     }
     const userMsgSection = (includeLatestUserMsg && latestUserMsg)
-        ? `\nUSER'S CURRENT MESSAGE — read this carefully before updating the tracker. Any scene changes the user describes (movement, time skip, weather mention, etc.) MUST be reflected in your tracker output:\n"${latestUserMsg}"\n`
+        ? `\nUSER'S CURRENT MESSAGE — use this to update location, weather, and characters if the scene requires it. Do NOT use any time-of-day mentions in this message to set the tracker time — time advances are governed by TIME RULES only:\n"${latestUserMsg}"\n`
         : '';
 
     // Build dynamic color legend from settings
@@ -926,7 +926,8 @@ ${currentTrackerText}
 
 TIME RULES — most important field:
   • IN-STORY fiction time only. NEVER use the real-world current date or clock time.
-  • Advance from the baseline above by the realistic amount the scene depicts (seconds to a few minutes for brief exchanges).
+  • Advance from the baseline above by the realistic amount the scene depicts — typically 2–15 minutes for a normal exchange.
+  • Only advance by 30+ minutes if the narrative explicitly shows a significant time skip (e.g., "an hour passed", "by late afternoon", "after a long walk"). Casual mentions of a time of day ("it's almost noon") are NOT instructions to jump the clock.
   • The date must match the story's setting (fantasy era, sci-fi calendar, historical period, etc.).
   • If no previous time exists, invent one that fits the world — do NOT use today's date.
   • Only jump hours or days when the exchange explicitly depicts that much time passing.
