@@ -1403,6 +1403,21 @@ function onCharacterMessageRendered(mesId) {
 }
 
 /**
+ * Fires at the start of any generation pass.
+ * For impersonation specifically, we clear the TT system prompt so the AI
+ * doesn't append a [TRACKER] block to the generated user message.
+ * injectPrompt() is called again in onUserMessageRendered, which fires once
+ * the impersonated message is placed into chat, restoring the prompt.
+ */
+function onGenerationStarted(type) {
+    if (type !== 'impersonate') return;
+    const s = getSettings();
+    if (!s.enabled) return;
+    setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
+    ttDebug('Impersonation started — TT prompt suppressed to prevent [TRACKER] injection');
+}
+
+/**
  * Fires when a user message is rendered.
  * Only renders existing tracker data — user message trackers are applied
  * retroactively by processMessage() after the AI responds.
@@ -1683,6 +1698,7 @@ jQuery(async () => {
     eventSource.on(event_types.CHAT_CHANGED,               onChatChanged);
     eventSource.on(event_types.MESSAGE_EDITED,             onMessageEdited);
     eventSource.on(event_types.MESSAGE_DELETED,            onMessageDeleted);
+    eventSource.on(event_types.GENERATION_STARTED,         onGenerationStarted);
 
     $(document).on('click', '.tt-regen-btn', async function () {
         const mesId = parseInt($(this).data('mesid'));
