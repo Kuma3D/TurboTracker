@@ -1410,11 +1410,49 @@ function onCharacterMessageRendered(mesId) {
  * the impersonated message is placed into chat, restoring the prompt.
  */
 function onGenerationStarted(type) {
-    if (type !== 'impersonate') return;
     const s = getSettings();
     if (!s.enabled) return;
-    setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
-    ttDebug('Impersonation started — TT prompt suppressed to prevent [TRACKER] injection');
+
+    if (type === 'impersonate') {
+        setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
+        ttDebug('Impersonation started — TT prompt suppressed to prevent [TRACKER] injection');
+        return;
+    }
+
+    if (type === 'swipe') {
+        // The last AI message is being replaced. Re-inject the prompt using the
+        // tracker from BEFORE that message so the AI doesn't keep compounding
+        // the previous swipe's result as its new baseline.
+        const ctx = getContext();
+        const chat = ctx?.chat || [];
+
+        let lastAiIdx = -1;
+        for (let i = chat.length - 1; i >= 0; i--) {
+            if (!chat[i].is_user) { lastAiIdx = i; break; }
+        }
+
+        if (lastAiIdx < 0 || !chat[lastAiIdx].extra?.tt_tracker) return;
+
+        // Temporarily hide the last AI message's tracker so injectPrompt scans
+        // back to the correct prior baseline.
+        const savedTracker = chat[lastAiIdx].extra.tt_tracker;
+        chat[lastAiIdx].extra.tt_tracker = null;
+
+        // Revert heartPoints to the value before the last AI response.
+        let prevHeart = s.defaultHeartValue || 0;
+        for (let i = lastAiIdx - 1; i >= 0; i--) {
+            const h = chat[i]?.extra?.tt_tracker?.heart;
+            if (h != null) { prevHeart = parseInt(h, 10) || 0; break; }
+        }
+        s.heartPoints = prevHeart;
+
+        injectPrompt();
+
+        // Restore — injectPrompt is synchronous so this is safe.
+        chat[lastAiIdx].extra.tt_tracker = savedTracker;
+
+        ttDebug(`Swipe started — re-injected prompt with pre-#${lastAiIdx} baseline, heart=${prevHeart}`);
+    }
 }
 
 /**
