@@ -926,8 +926,9 @@ ${currentTrackerText}
 
 TIME RULES — most important field:
   • IN-STORY fiction time only. NEVER use the real-world current date or clock time.
-  • Advance from the baseline above by the realistic amount the scene depicts — typically 2–15 minutes for a normal exchange.
-  • Only advance by 30+ minutes if the narrative explicitly shows a significant time skip (e.g., "an hour passed", "by late afternoon", "after a long walk"). Casual mentions of a time of day ("it's almost noon") are NOT instructions to jump the clock.
+  • HARD CAP: Advance by AT MOST 20 minutes from the baseline, unless the narrative text contains a literal, explicit time-skip phrase such as "an hour passed", "by late afternoon", "after several hours", "the next morning", etc.
+  • Default advance: 2–10 minutes for a typical exchange.
+  • Atmosphere words ("the morning sun", "it's almost noon", "the midday heat") are NOT time-skip phrases and must NOT move the clock more than a few minutes.
   • The date must match the story's setting (fantasy era, sci-fi calendar, historical period, etc.).
   • If no previous time exists, invent one that fits the world — do NOT use today's date.
   • Only jump hours or days when the exchange explicitly depicts that much time passing.
@@ -1421,9 +1422,11 @@ function onGenerationStarted(type) {
         return;
     }
 
-    // When the last message in chat is an AI message, we are swiping/regenerating it.
-    // Re-inject the prompt using the baseline from BEFORE that message so the AI
-    // doesn't compound the previous swipe's result.
+    // Only reset the baseline for explicit user-triggered regenerations.
+    // 'normal' fires for background token-count / quiet-prompt operations and
+    // must be ignored here, otherwise those events corrupt s.heartPoints and
+    // re-inject the wrong baseline while a generation is already in-flight.
+    if (type !== 'regenerate' && type !== 'swipe') return;
     const ctx = getContext();
     const chat = ctx?.chat || [];
     const lastMsg = chat[chat.length - 1];
