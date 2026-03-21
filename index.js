@@ -200,14 +200,13 @@ function extractHeartFromText(text) {
 
 /**
  * Generate a heart value for an AI message via a focused AI call.
- * Tries inline extraction first, then asks the AI.
+ * Uses delta-based prompting — asks the AI how much the heart CHANGES,
+ * not what it should be. This prevents the AI from defaulting to 0.
  * Callers must handle clearing/restoring the extension prompt if needed.
  */
 async function generateHeartValue(msgText, prevHeart, maxShift) {
     const prev  = parseInt(prevHeart, 10) || 0;
     const shift = Math.max(1, parseInt(maxShift, 10) || 2500);
-    const lo    = Math.max(0, prev - shift);
-    const hi    = Math.min(99999, prev + shift);
 
     // Try extracting from inline text first (e.g. "Black Heart (500) 🖤")
     const inline = extractHeartFromText(msgText);
@@ -217,26 +216,34 @@ async function generateHeartValue(msgText, prevHeart, maxShift) {
     }
 
     const prompt =
-`[OOC: Based on the following story excerpt, rate the character's romantic interest/affection toward {{user}}.
-Scale: 0 (hostile/indifferent) to 99,999 (deeply in love).
-Previous value: ${prev}. New value must be between ${lo} and ${hi}.
-Only the character's own emotions drive this — not user actions alone.
-Reply with ONLY a single integer. No other text.]
+`[OOC: Based on the following story excerpt, how does the character's romantic interest toward {{user}} change?
+Current heart value: ${prev} (scale: 0–99,999).
+Reply with ONLY a signed integer for the change amount. Examples: +500, -200, +1000, +50.
+Positive = warmer/friendlier feelings. Negative = colder/hostile feelings.
+Minimum magnitude: 50. Maximum magnitude: ${shift}.
+Even neutral or casual interactions should shift by at least +50 to +200.]
 
 "${(msgText || '').slice(0, 600)}"`;
 
     try {
         const response = await generateQuietPrompt(prompt, false, true);
         ttDebug(`generateHeartValue: raw="${response.slice(0, 80)}"`);
-        const match = response.trim().match(/\b(\d{1,5})\b/);
+        const match = response.trim().match(/([+-]?\d{1,5})/);
         if (match) {
-            return clampHeart(parseInt(match[1], 10), prev, shift);
+            const delta = parseInt(match[1], 10);
+            if (!isNaN(delta) && delta !== 0) {
+                const newVal = prev + delta;
+                return Math.max(0, Math.min(99999, Math.max(prev - shift, Math.min(prev + shift, newVal))));
+            }
         }
     } catch (e) {
         ttDebug(`generateHeartValue: ERROR ${e.message}`);
     }
 
-    return prev; // fallback: keep previous value
+    // Fallback: small positive nudge so heart always progresses
+    const fallback = Math.min(99999, prev + 50 + Math.floor(Math.random() * 150));
+    ttDebug(`generateHeartValue: AI failed/returned 0, fallback → ${fallback}`);
+    return fallback;
 }
 
 // ── Tag parsing ───────────────────────────────────────────────
@@ -1090,15 +1097,19 @@ function mergeTrackers(existing, filled) {
 // ── Retroactive population ────────────────────────────────────
 
 let isPopulating = false;
+let stopPopulate = false;
 
 async function populateAllMessages() {
     if (isPopulating) return;
     isPopulating = true;
+    stopPopulate = false;
 
     const btn    = $('#tt-populate-btn');
     const status = $('#tt-populate-status');
+    const stopBtn = $('#tt-stop-btn');
     btn.prop('disabled', true);
     $('#tt-regen-all-btn').prop('disabled', true);
+    stopBtn.show().prop('disabled', false).html('<i class="fa-solid fa-stop"></i> Stop');
 
     try {
         const s   = getSettings();
@@ -1122,6 +1133,12 @@ async function populateAllMessages() {
         status.text(`0 / ${aiMessages.length} messages…`);
 
         for (const { msg, idx } of aiMessages) {
+            if (stopPopulate) {
+                ttDebug('Populate stopped by user');
+                status.text('Stopped by user.');
+                break;
+            }
+
             // Always check for an inline heart value in the message text first.
             // This takes priority over everything — clamp, AI output, stored value.
             const inlineHeart    = extractHeartFromText(msg.mes || '');
@@ -1145,20 +1162,19 @@ async function populateAllMessages() {
                 const prevContext = getMostRecentTracker(ctx.chat, idx);
                 const prevHeart = parseInt(prevContext?.heart ?? s.heartPoints, 10) || 0;
                 const pMaxShift = (Number(s.heartSensitivity) || 5) * 500;
-                const pHeartLo = Math.max(0, prevHeart - pMaxShift);
-                const pHeartHi = Math.min(99999, prevHeart + pMaxShift);
 
-                // Heart always null for ST imports — will be generated below
-                stImported.heart = heartLocked ? lockedHeartVal : null;
+                // Heart handled separately — set placeholder so fill focuses on other fields
+                stImported.heart = heartLocked ? lockedHeartVal : prevHeart;
 
                 msg.extra = msg.extra || {};
                 msg.extra.tt_tracker = stImported;
 
-                if (hasBlankFields(stImported)) {
-                    ttDebug(`  #${idx} P1: has blank fields, calling AI fill`);
-                    const heartFill = heartLocked ? lockedHeartVal : '???';
-                    const heartCtx = heartLocked ? ''
-                        : ` Previous heart value: ${prevHeart}; new value must be between ${pHeartLo} and ${pHeartHi}.`;
+                // Fill non-heart blank fields (location details, character info, etc.)
+                const hasOtherBlanks = isBlankValue(stImported.time) || isBlankValue(stImported.location) || isBlankValue(stImported.weather) ||
+                    (stImported.characters || []).some(c => !c.description || !c.outfit || !c.state || !c.position);
+
+                if (hasOtherBlanks) {
+                    ttDebug(`  #${idx} P1: has blank non-heart fields, calling AI fill`);
                     const markV = v => isBlankValue(v) ? '???' : v;
                     const fillCharsText = (stImported.characters || []).length
                         ? stImported.characters
@@ -1166,7 +1182,7 @@ async function populateAllMessages() {
                             .join('\n')
                         : '- name: ??? | description: ??? | outfit: ??? | state: ??? | position: ???';
                     const fillPrompt =
-`[OOC: Extract tracker metadata from the story excerpt below. Output ONLY the completed [TRACKER]...[/TRACKER] block. Fill every ??? using the story for context.${heartCtx} No story content, no dialogue — only the block.]
+`[OOC: Extract tracker metadata from the story excerpt below. Output ONLY the completed [TRACKER]...[/TRACKER] block. Fill every ??? using the story for context. Do NOT change the heart value. No story content, no dialogue — only the block.]
 
 Story excerpt:
 "${(msg.mes || '').slice(0, 600)}"
@@ -1175,7 +1191,7 @@ Story excerpt:
 time: ${markV(stImported.time)}
 location: ${markV(stImported.location)}
 weather: ${markV(stImported.weather)}
-heart: ${heartFill}
+heart: ${prevHeart}
 characters:
 ${fillCharsText}
 [/TRACKER]`;
@@ -1186,12 +1202,10 @@ ${fillCharsText}
                         const filled = parseTrackerBlock(response);
                         ttDebug(`  #${idx} P1 fill: parsed=${filled ? `time="${filled.time}"` : 'null'}`);
                         if (filled) {
-                            msg.extra.tt_tracker = mergeTrackers(stImported, filled);
-                            if (heartLocked) msg.extra.tt_tracker.heart = lockedHeartVal;
-                            // Clamp the AI's heart value to the allowed range
-                            if (!heartLocked && msg.extra.tt_tracker.heart !== null) {
-                                msg.extra.tt_tracker.heart = clampHeart(msg.extra.tt_tracker.heart, prevHeart, pMaxShift);
-                            }
+                            // Merge non-heart fields only — heart handled below
+                            const merged = mergeTrackers(stImported, filled);
+                            merged.heart = stImported.heart; // preserve, don't use fill's heart
+                            msg.extra.tt_tracker = merged;
                         }
                     } catch (err) {
                         console.warn(`[TurboTracker] Could not fill blank ST fields for message #${idx}:`, err);
@@ -1199,9 +1213,9 @@ ${fillCharsText}
                     }
                 }
 
-                // If heart is still null after fill, generate via dedicated AI call
-                if (!heartLocked && (msg.extra.tt_tracker.heart === null || msg.extra.tt_tracker.heart === undefined)) {
-                    ttDebug(`  #${idx} P1: heart still null, generating via dedicated AI call`);
+                // Always generate heart independently for AI messages
+                if (!heartLocked) {
+                    ttDebug(`  #${idx} P1: generating heart (prev=${prevHeart})`);
                     setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
                     msg.extra.tt_tracker.heart = await generateHeartValue(msg.mes, prevHeart, pMaxShift);
                 }
@@ -1222,8 +1236,6 @@ ${fillCharsText}
                 const prevContext2 = getMostRecentTracker(ctx.chat, idx);
                 const prevHeart2 = parseInt(prevContext2?.heart ?? s.heartPoints, 10) || 0;
                 const p2MaxShift = (Number(s.heartSensitivity) || 5) * 500;
-                const p2HeartLo = Math.max(0, prevHeart2 - p2MaxShift);
-                const p2HeartHi = Math.min(99999, prevHeart2 + p2MaxShift);
 
                 // Inline heart always wins over whatever is stored
                 if (heartLocked) {
@@ -1236,13 +1248,7 @@ ${fillCharsText}
                 if (hasBlankFields(msg.extra.tt_tracker)) {
                     ttDebug(`  #${idx} P2: has blank fields, calling AI fill`);
                     const curTracker = msg.extra.tt_tracker;
-                    const heartFill = heartLocked ? lockedHeartVal
-                                    : (curTracker.heart === null || curTracker.heart === undefined) ? '???'
-                                    : parseInt(curTracker.heart, 10) || 0;
-                    const heartCtx = heartLocked ? ''
-                        : (curTracker.heart === null || curTracker.heart === undefined)
-                        ? ` Previous heart value: ${prevHeart2}; new value must be between ${p2HeartLo} and ${p2HeartHi}.`
-                        : '';
+                    const needsHeart = (curTracker.heart === null || curTracker.heart === undefined);
                     const markV = v => isBlankValue(v) ? '???' : v;
                     const fillCharsText = (curTracker.characters || []).length
                         ? curTracker.characters
@@ -1250,7 +1256,7 @@ ${fillCharsText}
                             .join('\n')
                         : '- name: ??? | description: ??? | outfit: ??? | state: ??? | position: ???';
                     const fillPrompt =
-`[OOC: Extract tracker metadata from the story excerpt below. Output ONLY the completed [TRACKER]...[/TRACKER] block. Fill every ??? using the story for context.${heartCtx} No story content, no dialogue — only the block.]
+`[OOC: Extract tracker metadata from the story excerpt below. Output ONLY the completed [TRACKER]...[/TRACKER] block. Fill every ??? using the story for context. Do NOT change the heart value. No story content, no dialogue — only the block.]
 
 Story excerpt:
 "${(msg.mes || '').slice(0, 600)}"
@@ -1259,7 +1265,7 @@ Story excerpt:
 time: ${markV(curTracker.time)}
 location: ${markV(curTracker.location)}
 weather: ${markV(curTracker.weather)}
-heart: ${heartFill}
+heart: ${needsHeart ? prevHeart2 : parseInt(curTracker.heart, 10) || 0}
 characters:
 ${fillCharsText}
 [/TRACKER]`;
@@ -1270,12 +1276,11 @@ ${fillCharsText}
                         const filled = parseTrackerBlock(response);
                         ttDebug(`  #${idx} P2 fill: parsed=${filled ? `time="${filled.time}"` : 'null'}`);
                         if (filled) {
-                            msg.extra.tt_tracker = mergeTrackers(msg.extra.tt_tracker, filled);
+                            const merged = mergeTrackers(msg.extra.tt_tracker, filled);
+                            // Preserve heart — don't use fill's value
+                            merged.heart = msg.extra.tt_tracker.heart;
+                            msg.extra.tt_tracker = merged;
                             if (heartLocked) msg.extra.tt_tracker.heart = lockedHeartVal;
-                            // Clamp the AI's heart value
-                            if (!heartLocked && msg.extra.tt_tracker.heart !== null && curTracker.heart === null) {
-                                msg.extra.tt_tracker.heart = clampHeart(msg.extra.tt_tracker.heart, prevHeart2, p2MaxShift);
-                            }
                         }
                     } catch (err) {
                         console.warn(`[TurboTracker] Could not fill blank fields for message #${idx}:`, err);
@@ -1457,38 +1462,46 @@ ${prefilledCharsText}
 
         // Handle user messages: use their own STTracker data if available,
         // otherwise inherit from the most recent preceding tracker.
-        for (let i = 0; i < ctx.chat.length; i++) {
-            const umsg = ctx.chat[i];
-            if (!umsg.is_user) continue;
+        if (!stopPopulate) {
+            ttDebug(`Processing ${ctx.chat.filter(m => m.is_user).length} user messages…`);
+            for (let i = 0; i < ctx.chat.length; i++) {
+                if (stopPopulate) break;
+                const umsg = ctx.chat[i];
+                if (!umsg.is_user) continue;
 
-            // If this user message has its own STTracker data, use it directly
-            const stImported = tryImportSTTracker(umsg);
-            if (stImported) {
-                const sourceTracker = getMostRecentTracker(ctx.chat, i);
-                stImported.heart = sourceTracker?.heart ?? null;
-                umsg.extra = umsg.extra || {};
-                umsg.extra.tt_tracker = stImported;
-                renderMessageTracker(i);
-                continue;
-            }
-
-            // Otherwise inherit from the nearest preceding tracker, with a small time
-            // nudge so user messages have a unique forward-moving time instead of
-            // duplicating the same timestamp as the preceding AI message.
-            const sourceTracker = getMostRecentTracker(ctx.chat, i);
-            if (sourceTracker) {
-                const existing = umsg.extra?.tt_tracker;
-                umsg.extra = umsg.extra || {};
-                if (existing) {
-                    // Already has a tracker — just sync heart from source, keep its time
-                    umsg.extra.tt_tracker = { ...existing, heart: sourceTracker.heart };
-                } else {
-                    const nudge = 2 + Math.floor(Math.random() * 4); // 2–5 min variance
-                    const nudgedTime = advanceTimeString(sourceTracker.time, nudge);
-                    ttDebug(`  user #${i}: inherited time="${sourceTracker.time}" +${nudge}min → "${nudgedTime}"`);
-                    umsg.extra.tt_tracker = { ...sourceTracker, time: nudgedTime };
+                // If this user message has its own STTracker data, use it directly
+                const stImported = tryImportSTTracker(umsg);
+                if (stImported) {
+                    const sourceTracker = getMostRecentTracker(ctx.chat, i);
+                    stImported.heart = sourceTracker?.heart ?? s.heartPoints;
+                    umsg.extra = umsg.extra || {};
+                    umsg.extra.tt_tracker = stImported;
+                    ttDebug(`  user #${i}: STTracker imported, heart=${stImported.heart}`);
+                    renderMessageTracker(i);
+                    continue;
                 }
-                renderMessageTracker(i);
+
+                // Otherwise inherit from the nearest preceding tracker, with a small time
+                // nudge so user messages have a unique forward-moving time instead of
+                // duplicating the same timestamp as the preceding AI message.
+                const sourceTracker = getMostRecentTracker(ctx.chat, i);
+                if (sourceTracker) {
+                    const existing = umsg.extra?.tt_tracker;
+                    umsg.extra = umsg.extra || {};
+                    if (existing) {
+                        // Already has a tracker — just sync heart from source, keep its time
+                        umsg.extra.tt_tracker = { ...existing, heart: sourceTracker.heart };
+                        ttDebug(`  user #${i}: synced heart=${sourceTracker.heart} to existing tracker`);
+                    } else {
+                        const nudge = 2 + Math.floor(Math.random() * 4); // 2–5 min variance
+                        const nudgedTime = advanceTimeString(sourceTracker.time, nudge);
+                        ttDebug(`  user #${i}: inherited time="${sourceTracker.time}" +${nudge}min → "${nudgedTime}" heart=${sourceTracker.heart}`);
+                        umsg.extra.tt_tracker = { ...sourceTracker, time: nudgedTime };
+                    }
+                    renderMessageTracker(i);
+                } else {
+                    ttDebug(`  user #${i}: no source tracker found — skipping`);
+                }
             }
         }
 
@@ -1499,8 +1512,10 @@ ${prefilledCharsText}
 
     } finally {
         isPopulating = false;
+        stopPopulate = false;
         btn.prop('disabled', false);
         $('#tt-regen-all-btn').prop('disabled', false);
+        stopBtn.hide();
         injectPrompt(true); // restore full prompt when done
     }
 }
@@ -1751,6 +1766,10 @@ function loadSettingsUi() {
                     <i class="fa-solid fa-wand-magic-sparkles"></i>
                     Populate All Trackers
                 </button>
+                <button id="tt-stop-btn" class="menu_button menu_button_icon" style="display:none;">
+                    <i class="fa-solid fa-stop"></i>
+                    Stop
+                </button>
                 <span id="tt-populate-status" class="tt-status"></span>
             </div>
             <div class="tt-setting-row">
@@ -1831,6 +1850,10 @@ function loadSettingsUi() {
 
     $('#tt-populate-btn').on('click', populateAllMessages);
     $('#tt-regen-all-btn').on('click', regenerateAllTrackers);
+    $('#tt-stop-btn').on('click', function () {
+        stopPopulate = true;
+        $(this).prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i> Stopping…');
+    });
 
     $('#tt-debug-enabled').on('change', function () {
         getSettings().debugEnabled = this.checked;
