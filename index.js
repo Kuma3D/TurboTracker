@@ -215,13 +215,21 @@ async function generateHeartValue(msgText, prevHeart, maxShift) {
         return clampHeart(inline, prev, shift);
     }
 
+    // Scale examples to the sensitivity setting so the AI understands the range
+    const small  = Math.round(shift * 0.1);   // ~10% of max shift
+    const medium = Math.round(shift * 0.3);   // ~30% of max shift
+    const large  = Math.round(shift * 0.7);   // ~70% of max shift
+
     const prompt =
 `[OOC: Based on the following story excerpt, how does the character's romantic interest toward {{user}} change?
 Current heart value: ${prev} (scale: 0–99,999).
-Reply with ONLY a signed integer for the change amount. Examples: +500, -200, +1000, +50.
+Reply with ONLY a signed integer for the change amount.
 Positive = warmer/friendlier feelings. Negative = colder/hostile feelings.
-Minimum magnitude: 50. Maximum magnitude: ${shift}.
-Even neutral or casual interactions should shift by at least +50 to +200.]
+Casual/neutral conversation: +${small} to +${medium}.
+Meaningful positive interaction (compliments, help, kindness): +${medium} to +${large}.
+Major emotional event (confession, kiss, sacrifice): +${large} to +${shift}.
+Negative interaction (argument, insult, rejection): -${small} to -${large}.
+Reply with ONLY a signed integer like +${medium} or -${small}. No other text.]
 
 "${(msgText || '').slice(0, 600)}"`;
 
@@ -240,10 +248,9 @@ Even neutral or casual interactions should shift by at least +50 to +200.]
         ttDebug(`generateHeartValue: ERROR ${e.message}`);
     }
 
-    // Fallback: small positive nudge so heart always progresses
-    const fallback = Math.min(99999, prev + 50 + Math.floor(Math.random() * 150));
-    ttDebug(`generateHeartValue: AI failed/returned 0, fallback → ${fallback}`);
-    return fallback;
+    // Fallback: keep previous value (don't add arbitrary amounts)
+    ttDebug(`generateHeartValue: AI failed/returned 0, keeping prev=${prev}`);
+    return prev;
 }
 
 // ── Tag parsing ───────────────────────────────────────────────
@@ -1125,19 +1132,56 @@ async function populateAllMessages() {
         // s.heartPoints / current tracker state that could contaminate historical generations.
         setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
 
-        const aiMessages = ctx.chat
-            .map((msg, idx) => ({ msg, idx }))
-            .filter(({ msg }) => !msg.is_user);
-
+        const totalMessages = ctx.chat.length;
         let done = 0;
-        status.text(`0 / ${aiMessages.length} messages…`);
+        status.text(`0 / ${totalMessages} messages…`);
 
-        for (const { msg, idx } of aiMessages) {
+        // Single pass — process ALL messages in chronological order.
+        // User messages inherit from the preceding AI message's tracker.
+        // AI messages go through P1/P2/P3/P4 as before.
+        for (let idx = 0; idx < ctx.chat.length; idx++) {
             if (stopPopulate) {
                 ttDebug('Populate stopped by user');
                 status.text('Stopped by user.');
                 break;
             }
+
+            const msg = ctx.chat[idx];
+
+            // ── User messages: inherit tracker from preceding AI message ──
+            if (msg.is_user) {
+                const stImported = tryImportSTTracker(msg);
+                if (stImported) {
+                    const sourceTracker = getMostRecentTracker(ctx.chat, idx);
+                    stImported.heart = sourceTracker?.heart ?? s.heartPoints;
+                    msg.extra = msg.extra || {};
+                    msg.extra.tt_tracker = stImported;
+                    ttDebug(`  user #${idx}: STTracker imported, heart=${stImported.heart}`);
+                } else {
+                    const sourceTracker = getMostRecentTracker(ctx.chat, idx);
+                    if (sourceTracker) {
+                        msg.extra = msg.extra || {};
+                        const existing = msg.extra.tt_tracker;
+                        if (existing) {
+                            msg.extra.tt_tracker = { ...existing, heart: sourceTracker.heart };
+                            ttDebug(`  user #${idx}: synced heart=${sourceTracker.heart}`);
+                        } else {
+                            const nudge = 2 + Math.floor(Math.random() * 4);
+                            const nudgedTime = advanceTimeString(sourceTracker.time, nudge);
+                            msg.extra.tt_tracker = { ...sourceTracker, time: nudgedTime };
+                            ttDebug(`  user #${idx}: inherited time="${sourceTracker.time}" +${nudge}min → "${nudgedTime}" heart=${sourceTracker.heart}`);
+                        }
+                    } else {
+                        ttDebug(`  user #${idx}: no source tracker found`);
+                    }
+                }
+                if (msg.extra?.tt_tracker) renderMessageTracker(idx);
+                done++;
+                status.text(`${done} / ${totalMessages} messages…`);
+                continue;
+            }
+
+            // ── AI messages ──
 
             // Always check for an inline heart value in the message text first.
             // This takes priority over everything — clamp, AI output, stored value.
@@ -1215,9 +1259,15 @@ ${fillCharsText}
 
                 // Always generate heart independently for AI messages
                 if (!heartLocked) {
-                    ttDebug(`  #${idx} P1: generating heart (prev=${prevHeart})`);
-                    setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
-                    msg.extra.tt_tracker.heart = await generateHeartValue(msg.mes, prevHeart, pMaxShift);
+                    if (!prevContext) {
+                        // First message in chat — use default starting heart, no AI call
+                        msg.extra.tt_tracker.heart = s.defaultHeartValue || 0;
+                        ttDebug(`  #${idx} P1: first message, heart set to default ${msg.extra.tt_tracker.heart}`);
+                    } else {
+                        ttDebug(`  #${idx} P1: generating heart (prev=${prevHeart})`);
+                        setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
+                        msg.extra.tt_tracker.heart = await generateHeartValue(msg.mes, prevHeart, pMaxShift);
+                    }
                 }
 
                 // Always update the running heart state so subsequent messages have a correct baseline
@@ -1225,7 +1275,7 @@ ${fillCharsText}
                 ttDebug(`  #${idx} P1 done: time="${msg.extra.tt_tracker.time}" heart=${msg.extra.tt_tracker.heart}`);
                 renderMessageTracker(idx);
                 done++;
-                status.text(`${done} / ${aiMessages.length} messages…`);
+                status.text(`${done} / ${totalMessages} messages…`);
                 continue;
             }
 
@@ -1303,7 +1353,7 @@ ${fillCharsText}
                 ttDebug(`  #${idx} P2 done: time="${msg.extra.tt_tracker.time}" heart=${msg.extra.tt_tracker.heart}`);
                 renderMessageTracker(idx);
                 done++;
-                status.text(`${done} / ${aiMessages.length} messages…`);
+                status.text(`${done} / ${totalMessages} messages…`);
                 continue;
             }
 
@@ -1323,7 +1373,7 @@ ${fillCharsText}
                 msg.extra.tt_tracker = existing;
                 renderMessageTracker(idx);
                 done++;
-                status.text(`${done} / ${aiMessages.length} messages…`);
+                status.text(`${done} / ${totalMessages} messages…`);
                 continue;
             }
 
@@ -1457,57 +1507,12 @@ ${prefilledCharsText}
             }
 
             done++;
-            status.text(`${done} / ${aiMessages.length} messages…`);
-        }
-
-        // Handle user messages: use their own STTracker data if available,
-        // otherwise inherit from the most recent preceding tracker.
-        if (!stopPopulate) {
-            ttDebug(`Processing ${ctx.chat.filter(m => m.is_user).length} user messages…`);
-            for (let i = 0; i < ctx.chat.length; i++) {
-                if (stopPopulate) break;
-                const umsg = ctx.chat[i];
-                if (!umsg.is_user) continue;
-
-                // If this user message has its own STTracker data, use it directly
-                const stImported = tryImportSTTracker(umsg);
-                if (stImported) {
-                    const sourceTracker = getMostRecentTracker(ctx.chat, i);
-                    stImported.heart = sourceTracker?.heart ?? s.heartPoints;
-                    umsg.extra = umsg.extra || {};
-                    umsg.extra.tt_tracker = stImported;
-                    ttDebug(`  user #${i}: STTracker imported, heart=${stImported.heart}`);
-                    renderMessageTracker(i);
-                    continue;
-                }
-
-                // Otherwise inherit from the nearest preceding tracker, with a small time
-                // nudge so user messages have a unique forward-moving time instead of
-                // duplicating the same timestamp as the preceding AI message.
-                const sourceTracker = getMostRecentTracker(ctx.chat, i);
-                if (sourceTracker) {
-                    const existing = umsg.extra?.tt_tracker;
-                    umsg.extra = umsg.extra || {};
-                    if (existing) {
-                        // Already has a tracker — just sync heart from source, keep its time
-                        umsg.extra.tt_tracker = { ...existing, heart: sourceTracker.heart };
-                        ttDebug(`  user #${i}: synced heart=${sourceTracker.heart} to existing tracker`);
-                    } else {
-                        const nudge = 2 + Math.floor(Math.random() * 4); // 2–5 min variance
-                        const nudgedTime = advanceTimeString(sourceTracker.time, nudge);
-                        ttDebug(`  user #${i}: inherited time="${sourceTracker.time}" +${nudge}min → "${nudgedTime}" heart=${sourceTracker.heart}`);
-                        umsg.extra.tt_tracker = { ...sourceTracker, time: nudgedTime };
-                    }
-                    renderMessageTracker(i);
-                } else {
-                    ttDebug(`  user #${i}: no source tracker found — skipping`);
-                }
-            }
+            status.text(`${done} / ${totalMessages} messages…`);
         }
 
         await ctx.saveChat();
         saveSettingsDebounced();
-        status.text('Done!');
+        status.text(stopPopulate ? 'Stopped.' : 'Done!');
         setTimeout(() => status.text(''), 3000);
 
     } finally {
