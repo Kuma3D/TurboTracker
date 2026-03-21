@@ -161,6 +161,7 @@ function estimateMinutesFromContent(text, prevTimeStr) {
     // ── Parse the previous time into 24h hours for time-of-day jumps ──
     let prevHour24 = null;
     if (prevTimeStr) {
+        // Format 1: H:MM AM/PM (12-hour)
         const tm = prevTimeStr.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)/i);
         if (tm) {
             let h = parseInt(tm[1], 10);
@@ -168,6 +169,12 @@ function estimateMinutesFromContent(text, prevTimeStr) {
             if (p === 'PM' && h !== 12) h += 12;
             if (p === 'AM' && h === 12) h = 0;
             prevHour24 = h;
+        } else {
+            // Format 2: HH:MM:SS or HH:MM (24-hour, no AM/PM)
+            const tm2 = prevTimeStr.match(/^(\d{1,2}):(\d{2})(?::\d{2})?/);
+            if (tm2) {
+                prevHour24 = parseInt(tm2[1], 10);
+            }
         }
     }
 
