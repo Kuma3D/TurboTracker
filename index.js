@@ -961,52 +961,52 @@ ${charsTemplate}
         ttDebug(`  regen #${mesId}: raw response="${(response || '').slice(0, 200).replace(/\n/g, '\\n')}"`);
 
         let data = parseTrackerBlock(response);
-        ttDebug(`  regen #${mesId}: parsed=${data ? `time="${data.time}" heart=${data.heart}` : 'null (no [TRACKER] block)'}`);
+        ttDebug(`  regen #${mesId}: parsed=${data ? `time="${data.time}" heart=${data.heart} chars=${(data.characters||[]).map(c=>c.name).join(',')}` : 'null (no [TRACKER] block)'}`);
 
         // Fallback: if the AI returned roleplay instead of a tracker block,
-        // use the current message's STTracker data if available, otherwise
-        // clone the existing tracker — but always prefer current-message characters.
+        // build from existing tracker data. For regen, the existing tt_tracker
+        // is preferred over STTracker (user may have already corrected it).
         if (!data) {
             ttDebug(`  regen #${mesId}: AI returned no tracker block — using fallback`);
             const existingTracker = msg.extra?.tt_tracker;
 
-            if (currentSTData) {
-                // Current message has STTracker data — use it as the base
-                data = { ...currentSTData };
-                ttDebug(`  regen #${mesId}: using current msg STTracker (chars=${(data.characters||[]).map(c=>c.name).join(',')})`);
-            } else if (existingTracker) {
-                data = { ...existingTracker, characters: [...(existingTracker.characters || [])] };
+            if (existingTracker) {
+                // Already has a tracker (from populate or previous regen) — use it as base
+                data = { ...existingTracker, characters: (existingTracker.characters || []).map(c => ({...c})) };
+                ttDebug(`  regen #${mesId}: using existing tt_tracker (chars=${(data.characters||[]).map(c=>c.name).join(',')})`);
+            } else if (currentSTData) {
+                data = { ...currentSTData, characters: (currentSTData.characters || []).map(c => ({...c})) };
+                ttDebug(`  regen #${mesId}: using STTracker (chars=${(data.characters||[]).map(c=>c.name).join(',')})`);
             } else if (prevTrackerObj) {
-                data = { ...prevTrackerObj, characters: [...(prevTrackerObj.characters || [])] };
+                data = { ...prevTrackerObj, characters: (prevTrackerObj.characters || []).map(c => ({...c})) };
+                ttDebug(`  regen #${mesId}: using prev tracker (chars=${(data.characters||[]).map(c=>c.name).join(',')})`);
             } else {
                 data = {
-                    time:       regenUserTime || (regenPrevTime ? advanceTimeString(regenPrevTime, 3) : 'Unknown'),
+                    time:       'Unknown',
                     location:   'Unknown',
                     weather:    'Unknown',
                     heart:      prevHeart,
                     characters: [],
                 };
             }
-
-            // Even if we cloned from existing/prev, override characters with
-            // current message's STTracker characters when available
-            if (currentSTData?.characters?.length && data !== currentSTData) {
-                data.characters = [...currentSTData.characters];
-            }
-
-            // Advance time for the fallback
-            if (!msg.is_user && regenPrevTime) {
-                const nudge = estimateMinutesFromContent(msg.mes || '');
-                data.time = advanceTimeString(regenPrevTime, nudge);
-            }
         }
 
+        // ── Always enforce time ourselves — never trust the AI's time ──
+        // The AI regularly returns wildly wrong times (hours off, wrong period).
+        // Compute from previous tracker time + heuristic minute advance.
         if (msg.is_user) {
-            // Hard lock heart and time on user messages
             data.heart = prevHeart;
-            if (regenPrevTime) data.time = advanceTimeString(regenPrevTime, regenNudge);
+            if (regenPrevTime) {
+                data.time = advanceTimeString(regenPrevTime, regenNudge);
+            }
         } else {
-            // For AI messages: if the AI provided a valid heart in the tracker block, clamp it.
+            if (regenPrevTime) {
+                const nudge = estimateMinutesFromContent(msg.mes || '');
+                data.time = advanceTimeString(regenPrevTime, nudge);
+                ttDebug(`  regen #${mesId}: enforced time: prev="${regenPrevTime}" +${nudge}min → "${data.time}"`);
+            }
+
+            // Heart: if the AI provided a valid heart in the tracker block, clamp it.
             // Otherwise generate via hybrid (AI + heuristic fallback).
             if (data.heart !== null && data.heart !== undefined && !isNaN(parseInt(data.heart, 10))) {
                 data.heart = heartKnown
