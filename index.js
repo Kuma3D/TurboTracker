@@ -327,9 +327,11 @@ function extractLocationFromText(text, prevLocation) {
     const allPlaces = [...roomTypes, ...buildingTypes, ...outdoorTypes];
     const placePattern = allPlaces.map(p => p.replace(/\s+/g, '\\s+')).join('|');
 
-    // Match "into/in/at/entered/inside the [place]" — capture the place
+    // Match "into/in/at/entered/inside the [adj] [adj] [place]" — capture the place.
+    // Allow up to 2 adjectives between the determiner and the place noun
+    // so phrases like "at the local bar" and "in the small inn room" match.
     const placeRegex = new RegExp(
-        `(?:(?:walk|step|go|went|head|mov|pad|rush|hurr|sneak|creep|wander|stroll)(?:ed|s|ing)?\\s+)?(?:into|in|at|inside|entered?|through)\\s+(?:the|our|my|his|her|their|a|an)\\s+(${placePattern})`,
+        `(?:(?:walk|step|go|went|head|mov|pad|rush|hurr|sneak|creep|wander|stroll)(?:ed|s|ing)?\\s+)?(?:into|in|at|inside|entered?|through)\\s+(?:the|our|my|his|her|their|a|an)\\s+(?:\\w+\\s+){0,2}(${placePattern})`,
         'gi'
     );
 
@@ -1080,10 +1082,11 @@ async function regenTracker(mesId) {
             genPrompt =
 `[OOC: Based on the user's message below and the previous tracker state, produce an updated tracker reflecting any scene changes the user's message logically implies. Output ONLY the tracker block — no other text.
 
+IMPORTANT: Location must reflect where the scene takes place at the END of this message. If the user moved to a new location (entered a building, went to a bar, arrived home, etc.), use the NEW location — not the previous one.
 The time is already set — do NOT change it.
 heart must remain exactly ${prevHeart} — only the character's emotions change this, never the user.]
 
-Previous tracker state:
+Previous tracker state (for reference — update location if the scene moved):
 ${prevTrackerText}
 
 User's message:
@@ -1091,7 +1094,7 @@ ${msg.mes}
 
 [TRACKER]
 time: ${regenUserTime}
-location: Full location description
+location: Where the scene takes place at the END of this message
 weather: Weather description, Temperature
 heart: ${prevHeart}
 characters:
@@ -1294,12 +1297,15 @@ Warm afternoon, sunny with clear skies]
                 ttDebug(`  regen #${mesId}: locPrompt ERROR ${e.message}`);
                 injectPrompt(true);
             }
+        }
 
-            // ── Text-based location heuristic (final override) ──
-            // If the message text contains clear movement/arrival patterns
-            // (e.g. "walked into the kitchen", "arrived home"), use that
-            // as the definitive location — it's more reliable than the AI
-            // which often picks up locations from prior context.
+        // ── Text-based location heuristic (final override for ALL messages) ──
+        // If the message text contains clear movement/arrival patterns
+        // (e.g. "walked into the kitchen", "arrived home"), use that
+        // as the definitive location — it's more reliable than the AI
+        // which often picks up locations from prior context.
+        // Runs for BOTH user and AI messages.
+        if (msg.mes) {
             const prevLoc = prevTrackerObj?.location || data.location || '';
             const heuristicLoc = extractLocationFromText(msg.mes, prevLoc);
             if (heuristicLoc) {
