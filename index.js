@@ -388,9 +388,24 @@ function getBestPrevContext(chat, beforeMesId) {
     if (ttTracker) {
         // Patch the tracker with prevTime if its own time is blank
         const patched = !isBlankValue(ttTracker.time) ? ttTracker : { ...ttTracker, time: prevTime };
+        // If this tracker has a heart value, use it. Otherwise scan further back
+        // to find any tracker with a non-null heart — ST-Tracker imports store
+        // null hearts, so the nearest tracker may not have one.
+        let prevHeart = null;
+        if (ttTracker.heart !== null && ttTracker.heart !== undefined) {
+            prevHeart = parseInt(ttTracker.heart, 10);
+        } else {
+            for (let i = ttIdx - 1; i >= 0; i--) {
+                const h = chat[i]?.extra?.tt_tracker?.heart;
+                if (h !== null && h !== undefined) {
+                    prevHeart = parseInt(h, 10);
+                    break;
+                }
+            }
+        }
         return {
             trackerText: formatTrackerForPrompt(patched),
-            prevHeart:   (ttTracker.heart !== null && ttTracker.heart !== undefined) ? parseInt(ttTracker.heart, 10) : null,
+            prevHeart,
             prevTime,
         };
     }
@@ -410,7 +425,7 @@ function getBestPrevContext(chat, beforeMesId) {
                 break;
             }
         }
-        return { trackerText: formatTrackerForPrompt(synth), prevHeart: null, prevTime: stTime };
+        return { trackerText: formatTrackerForPrompt(synth), prevHeart: 0, prevTime: stTime };
     }
 
     return { trackerText: 'None', prevHeart: 0, prevTime: null };
@@ -684,7 +699,12 @@ function processMessage(mesId) {
     const imported = tryImportSTTracker(msg);
     if (imported) {
         ttDebug(`  #${mesId} STTracker imported: time="${imported.time}"`);
-        // heart stays null — ST-Tracker has no heart data; regen/populate will fill it
+        // ST-Tracker has no heart data — carry forward from the most recent
+        // preceding tracker so the heart chain stays intact.
+        const prevTracker = getMostRecentTracker(ctx.chat, mesId);
+        imported.heart = prevTracker?.heart ?? s.heartPoints;
+        s.heartPoints = parseInt(imported.heart, 10) || 0;
+        ttDebug(`  #${mesId} STTracker heart carried forward: ${imported.heart}`);
         msg.extra = msg.extra || {};
         msg.extra.tt_tracker = imported;
         ctx.saveChat();
@@ -1074,9 +1094,10 @@ async function populateAllMessages() {
             if (stImported) {
                 ttDebug(`  #${idx} P1: STTracker time="${stImported.time}" loc="${stImported.location}"`);
                 // Heart comes from the nearest preceding processed tracker,
-                // since STTracker doesn't track heart.
+                // since STTracker doesn't track heart. Fall back to current
+                // running heartPoints so the chain never breaks.
                 const prevContext = getMostRecentTracker(ctx.chat, idx);
-                stImported.heart = prevContext?.heart ?? null;
+                stImported.heart = prevContext?.heart ?? s.heartPoints;
 
                 if (heartLocked) {
                     stImported.heart = lockedHeartVal;
