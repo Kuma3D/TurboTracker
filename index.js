@@ -199,7 +199,78 @@ function extractHeartFromText(text) {
 }
 
 /**
- * Keyword-based heuristic for estimating heart change from message content.
+ * Build a roster of all known character names + data from every tracker
+ * in the chat, then return only those characters whose first name or
+ * full name appears in the given message text.
+ *
+ * This avoids blindly cloning characters from previous trackers or
+ * stale STTracker data — only characters actually mentioned in the
+ * message text are included.
+ *
+ * @param {Array} chat   - The full chat array.
+ * @param {number} mesId - Index of the message to scan.
+ * @returns {Array|null}  Array of character objects found, or null if none.
+ */
+function detectCharactersInMessage(chat, mesId) {
+    const msg = chat[mesId];
+    if (!msg?.mes) return null;
+
+    const text = msg.mes;
+
+    // Build roster from all trackers in the chat (tt_tracker + raw STTracker)
+    const roster = new Map(); // name → character data (latest wins)
+    for (let i = 0; i < chat.length; i++) {
+        const tt = chat[i]?.extra?.tt_tracker;
+        if (tt?.characters) {
+            for (const c of tt.characters) {
+                if (c.name) roster.set(c.name, { ...c });
+            }
+        }
+        const st = chat[i]?.tracker;
+        if (st && typeof st === 'object') {
+            const imported = convertSTTrackerToTT(st);
+            if (imported?.characters) {
+                for (const c of imported.characters) {
+                    if (c.name && !roster.has(c.name)) roster.set(c.name, { ...c });
+                }
+            }
+        }
+    }
+
+    if (roster.size === 0) return null;
+
+    // Match characters whose first name or full name appears in the message
+    const found = [];
+    for (const [name, charData] of roster) {
+        const firstName = name.split(/\s+/)[0];
+        // Use word boundary to avoid partial matches (e.g. "Roy" in "destroy")
+        const firstNameRe = new RegExp(`\\b${firstName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+        if (firstNameRe.test(text)) {
+            found.push({ ...charData });
+        }
+    }
+
+    // Also include the main AI character (narrator) — they may not be named
+    // in their own text since it's written from their perspective
+    const ctx = getContext();
+    const charName = ctx.name2;
+    if (charName && !found.some(c => c.name === charName)) {
+        const charFirstName = charName.split(/\s+/)[0];
+        const charRe = new RegExp(`\\b${charFirstName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+        // For AI messages, always include the main character even if not named
+        // For user messages, only include if mentioned
+        if (!msg.is_user || charRe.test(text)) {
+            const rosterData = roster.get(charName);
+            if (rosterData) {
+                found.push({ ...rosterData });
+            } else {
+                found.push({ name: charName, description: '', outfit: '', state: '', position: '' });
+            }
+        }
+    }
+
+    return found.length > 0 ? found : null;
+}
  * Returns a signed integer delta.  All values are fractions of maxShift —
  * the absolute value of the return will NEVER exceed maxShift.
  *
@@ -865,15 +936,18 @@ async function regenTracker(mesId) {
         const heartLo    = heartKnown ? Math.max(0,     prevHeart - maxShift) : 0;
         const heartHi    = heartKnown ? Math.min(99999, prevHeart + maxShift) : 99999;
 
-        // Check if the CURRENT message has STTracker data — its characters are
-        // ground truth for this message and must override whatever the previous tracker had.
+        // Check if the CURRENT message has STTracker data (used as seed for
+        // fields like time/location/weather but NOT characters — STTracker
+        // character data is often stale from the old extension).
         const currentSTData = tryImportSTTracker(msg);
         const prevTrackerObj = getMostRecentTracker(ctx.chat, mesId);
 
-        // Build the character template for the prompt — prefer current message's
-        // STTracker characters, then existing tt_tracker characters, then previous tracker.
-        const currentChars = currentSTData?.characters
+        // Detect which characters are actually mentioned in this message's text.
+        // This avoids blindly cloning stale STTracker or previous-tracker characters.
+        const detectedChars = detectCharactersInMessage(ctx.chat, mesId);
+        const currentChars = detectedChars
             || msg.extra?.tt_tracker?.characters
+            || currentSTData?.characters
             || prevTrackerObj?.characters
             || [];
         const charsTemplate = currentChars.length
@@ -971,15 +1045,14 @@ ${charsTemplate}
             const existingTracker = msg.extra?.tt_tracker;
 
             if (existingTracker) {
-                // Already has a tracker (from populate or previous regen) — use it as base
                 data = { ...existingTracker, characters: (existingTracker.characters || []).map(c => ({...c})) };
-                ttDebug(`  regen #${mesId}: using existing tt_tracker (chars=${(data.characters||[]).map(c=>c.name).join(',')})`);
+                ttDebug(`  regen #${mesId}: base from existing tt_tracker`);
             } else if (currentSTData) {
                 data = { ...currentSTData, characters: (currentSTData.characters || []).map(c => ({...c})) };
-                ttDebug(`  regen #${mesId}: using STTracker (chars=${(data.characters||[]).map(c=>c.name).join(',')})`);
+                ttDebug(`  regen #${mesId}: base from STTracker`);
             } else if (prevTrackerObj) {
                 data = { ...prevTrackerObj, characters: (prevTrackerObj.characters || []).map(c => ({...c})) };
-                ttDebug(`  regen #${mesId}: using prev tracker (chars=${(data.characters||[]).map(c=>c.name).join(',')})`);
+                ttDebug(`  regen #${mesId}: base from prev tracker`);
             } else {
                 data = {
                     time:       'Unknown',
@@ -989,6 +1062,14 @@ ${charsTemplate}
                     characters: [],
                 };
             }
+        }
+
+        // ── Always override characters with text-detected characters ──
+        // The AI, STTracker, and cloned trackers all produce stale/wrong
+        // character lists. Text detection is the most reliable source.
+        if (detectedChars) {
+            data.characters = detectedChars.map(c => ({...c}));
+            ttDebug(`  regen #${mesId}: characters overridden by text detection: ${detectedChars.map(c=>c.name).join(',')}`);
         }
 
         // ── Always enforce time ourselves — never trust the AI's time ──
