@@ -248,7 +248,11 @@ function parseTrackerBlock(text) {
         if      (key === 'time')     result.time     = val;
         else if (key === 'location') result.location = val;
         else if (key === 'weather')  result.weather  = val;
-        else if (key === 'heart')    result.heart    = val;
+        else if (key === 'heart') {
+            // Coerce to integer immediately — descriptive text (e.g. "Alice feels...") becomes null
+            const h = parseInt(val, 10);
+            result.heart = isNaN(h) ? null : h;
+        }
     }
 
     return result;
@@ -1093,7 +1097,7 @@ async function populateAllMessages() {
                             .join('\n')
                         : '- name: ??? | description: ??? | outfit: ??? | state: ??? | position: ???';
                     const fillPrompt =
-`[OOC: Fill in every ??? in this tracker. Keep all non-??? values exactly as-is. Output ONLY the completed [TRACKER]...[/TRACKER] block — no other text.]
+`[OOC — META TASK, NOT ROLEPLAY: Do not write story content or character dialogue. Fill in every ??? below. Keep all non-??? values exactly as-is. heart must be an integer (e.g. 15000). Reply with ONLY the [TRACKER]...[/TRACKER] block — nothing else.]
 
 [TRACKER]
 time: ${markV(stImported.time)}
@@ -1153,7 +1157,7 @@ ${fillCharsText}
                             .join('\n')
                         : '- name: ??? | description: ??? | outfit: ??? | state: ??? | position: ???';
                     const fillPrompt =
-`[OOC: Fill in every ??? in this tracker. Keep all non-??? values exactly as-is. Output ONLY the completed [TRACKER]...[/TRACKER] block — no other text.]
+`[OOC — META TASK, NOT ROLEPLAY: Do not write story content or character dialogue. Fill in every ??? below. Keep all non-??? values exactly as-is. heart must be an integer (e.g. 15000). Reply with ONLY the [TRACKER]...[/TRACKER] block — nothing else.]
 
 [TRACKER]
 time: ${markV(curTracker.time)}
