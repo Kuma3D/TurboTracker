@@ -1097,7 +1097,10 @@ async function populateAllMessages() {
                             .join('\n')
                         : '- name: ??? | description: ??? | outfit: ??? | state: ??? | position: ???';
                     const fillPrompt =
-`[OOC — META TASK, NOT ROLEPLAY: Do not write story content or character dialogue. Fill in every ??? below. Keep all non-??? values exactly as-is. heart must be an integer (e.g. 15000). Reply with ONLY the [TRACKER]...[/TRACKER] block — nothing else.]
+`[OOC: Extract tracker metadata from the story excerpt below. Output ONLY the completed [TRACKER]...[/TRACKER] block. Fill every ??? using the story for context. heart must be an integer (0–99999, e.g. 15000). No story content, no dialogue — only the block.]
+
+Story excerpt:
+"${(msg.mes || '').slice(0, 600)}"
 
 [TRACKER]
 time: ${markV(stImported.time)}
@@ -1107,6 +1110,7 @@ heart: ${heartFill}
 characters:
 ${fillCharsText}
 [/TRACKER]`;
+                    setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
                     try {
                         const response = await generateQuietPrompt(fillPrompt, false, true);
                         ttDebug(`  #${idx} P1 fill raw: "${response.slice(0, 300).replace(/\n/g, '\\n')}"`);
@@ -1119,6 +1123,8 @@ ${fillCharsText}
                     } catch (err) {
                         console.warn(`[TurboTracker] Could not fill blank ST fields for message #${idx}:`, err);
                         ttDebug(`  #${idx} P1 fill ERROR: ${err.message}`);
+                    } finally {
+                        injectPrompt();
                     }
                 }
 
@@ -1157,7 +1163,10 @@ ${fillCharsText}
                             .join('\n')
                         : '- name: ??? | description: ??? | outfit: ??? | state: ??? | position: ???';
                     const fillPrompt =
-`[OOC — META TASK, NOT ROLEPLAY: Do not write story content or character dialogue. Fill in every ??? below. Keep all non-??? values exactly as-is. heart must be an integer (e.g. 15000). Reply with ONLY the [TRACKER]...[/TRACKER] block — nothing else.]
+`[OOC: Extract tracker metadata from the story excerpt below. Output ONLY the completed [TRACKER]...[/TRACKER] block. Fill every ??? using the story for context. heart must be an integer (0–99999, e.g. 15000). No story content, no dialogue — only the block.]
+
+Story excerpt:
+"${(msg.mes || '').slice(0, 600)}"
 
 [TRACKER]
 time: ${markV(curTracker.time)}
@@ -1167,6 +1176,7 @@ heart: ${heartFill}
 characters:
 ${fillCharsText}
 [/TRACKER]`;
+                    setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
                     try {
                         const response = await generateQuietPrompt(fillPrompt, false, true);
                         ttDebug(`  #${idx} P2 fill raw: "${response.slice(0, 300).replace(/\n/g, '\\n')}"`);
@@ -1179,6 +1189,8 @@ ${fillCharsText}
                     } catch (err) {
                         console.warn(`[TurboTracker] Could not fill blank fields for message #${idx}:`, err);
                         ttDebug(`  #${idx} P2 fill ERROR: ${err.message}`);
+                    } finally {
+                        injectPrompt();
                     }
                 }
 
