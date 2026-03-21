@@ -217,13 +217,24 @@ function detectCharactersInMessage(chat, mesId) {
 
     const text = msg.mes;
 
-    // Build roster from all trackers in the chat (tt_tracker + raw STTracker)
-    const roster = new Map(); // name → character data (latest wins)
+    // Build roster from all trackers in the chat (tt_tracker + raw STTracker).
+    // Merge character data so we keep the most complete version of each character
+    // (e.g. if Brian had a description in message #5 but not #18, we keep #5's).
+    const roster = new Map(); // name → character data (merged, non-empty fields win)
+    const mergeChar = (existing, incoming) => ({
+        name:        incoming.name,
+        description: incoming.description || existing.description || '',
+        outfit:      incoming.outfit      || existing.outfit      || '',
+        state:       incoming.state       || existing.state       || '',
+        position:    incoming.position    || existing.position    || '',
+    });
     for (let i = 0; i < chat.length; i++) {
         const tt = chat[i]?.extra?.tt_tracker;
         if (tt?.characters) {
             for (const c of tt.characters) {
-                if (c.name) roster.set(c.name, { ...c });
+                if (!c.name) continue;
+                const prev = roster.get(c.name);
+                roster.set(c.name, prev ? mergeChar(prev, c) : { ...c });
             }
         }
         const st = chat[i]?.tracker;
@@ -231,7 +242,9 @@ function detectCharactersInMessage(chat, mesId) {
             const imported = convertSTTrackerToTT(st);
             if (imported?.characters) {
                 for (const c of imported.characters) {
-                    if (c.name && !roster.has(c.name)) roster.set(c.name, { ...c });
+                    if (!c.name) continue;
+                    const prev = roster.get(c.name);
+                    roster.set(c.name, prev ? mergeChar(prev, c) : { ...c });
                 }
             }
         }
@@ -1073,6 +1086,20 @@ ${charsTemplate}
         if (detectedChars) {
             data.characters = detectedChars.map(c => ({...c}));
             ttDebug(`  regen #${mesId}: characters overridden by text detection: ${detectedChars.map(c=>c.name).join(',')}`);
+        }
+
+        // ── Override location/weather with current message's STTracker data ──
+        // STTracker location/weather is message-specific (captured at the time
+        // the message was created) and more reliable than cloned data from
+        // existing/previous trackers which may be from a different scene.
+        if (currentSTData) {
+            if (currentSTData.location && !isBlankValue(currentSTData.location)) {
+                data.location = currentSTData.location;
+            }
+            if (currentSTData.weather && !isBlankValue(currentSTData.weather)) {
+                data.weather = currentSTData.weather;
+            }
+            ttDebug(`  regen #${mesId}: STTracker overrides — loc="${data.location}" weather="${data.weather}"`);
         }
 
         // ── Always enforce time ourselves — never trust the AI's time ──
