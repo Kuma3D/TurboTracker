@@ -2119,12 +2119,19 @@ async function onMessageEdited(mesId) {
     const msg = ctx.chat[mesId];
     if (!msg) return;
 
-    if (msg.is_user) {
-        if (msg.extra?.tt_tracker) renderMessageTracker(mesId);
+    // If the message already has tracker data, just re-render it.
+    // Don't regenerate — the user can click "Regenerate Tracker" if they
+    // want a fresh tracker after editing the message text.
+    if (msg.extra?.tt_tracker) {
+        renderMessageTracker(mesId);
         return;
     }
 
-    await processMessage(mesId);
+    // No existing tracker — only process AI messages (user messages
+    // without tracker data don't need processing).
+    if (!msg.is_user) {
+        await processMessage(mesId);
+    }
 }
 
 function onMessageDeleted() {
