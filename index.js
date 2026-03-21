@@ -82,13 +82,30 @@ function clampHeart(rawValue, prevHeart, maxShift) {
  */
 function advanceTimeString(timeStr, minutes) {    if (!timeStr) return timeStr;
 
+    // Helper: advance date portion by N days
+    // Handles "; MM/DD/YYYY (DayOfWeek)" suffix
+    function advanceDateInSuffix(suffix, days) {
+        if (days <= 0) return suffix;
+        const dm = suffix.match(/^(.*?;\s*)(\d{1,2})\/(\d{1,2})\/(\d{4})\s*\((\w+)\)(.*)/);
+        if (!dm) return suffix;
+        const [, pre, mm, dd, yyyy, , post] = dm;
+        const d = new Date(parseInt(yyyy), parseInt(mm) - 1, parseInt(dd));
+        d.setDate(d.getDate() + days);
+        const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+        const newMM = String(d.getMonth() + 1).padStart(2, '0');
+        const newDD = String(d.getDate()).padStart(2, '0');
+        const newYYYY = d.getFullYear();
+        const newDay = dayNames[d.getDay()];
+        return `${pre}${newMM}/${newDD}/${newYYYY} (${newDay})${post}`;
+    }
+
     // Format 1: H:MM AM/PM (with optional date suffix)
     const m = timeStr.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)(.*)/i);
     if (m) {
         let hours = parseInt(m[1], 10);
         let mins  = parseInt(m[2], 10);
         const period = m[3].toUpperCase();
-        const rest   = m[4];
+        let rest   = m[4];
 
         if (period === 'PM' && hours !== 12) hours += 12;
         if (period === 'AM' && hours === 12) hours  = 0;
@@ -96,7 +113,9 @@ function advanceTimeString(timeStr, minutes) {    if (!timeStr) return timeStr;
         mins  += minutes;
         hours += Math.floor(mins / 60);
         mins   = mins  % 60;
+        const daysOver = Math.floor(hours / 24);
         hours  = hours % 24;
+        if (daysOver > 0) rest = advanceDateInSuffix(rest, daysOver);
 
         const newPeriod = hours >= 12 ? 'PM' : 'AM';
         let   newHours  = hours % 12;
@@ -113,12 +132,14 @@ function advanceTimeString(timeStr, minutes) {    if (!timeStr) return timeStr;
         let hours = parseInt(m2[1], 10);
         let mins  = parseInt(m2[2], 10);
         const secs = m2[3];
-        const rest = m2[4];
+        let rest = m2[4];
 
         mins  += minutes;
         hours += Math.floor(mins / 60);
         mins   = mins  % 60;
+        const daysOver = Math.floor(hours / 24);
         hours  = hours % 24;
+        if (daysOver > 0) rest = advanceDateInSuffix(rest, daysOver);
 
         const result = `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${secs}${rest}`;
         ttDebug(`advanceTime: "${timeStr}" +${minutes}min → "${result}"`);
@@ -181,7 +202,7 @@ function estimateMinutesFromContent(text, prevTimeStr) {
     // ── Time-of-day keywords — jump to the stated time of day ──
     // If the text explicitly says "evening air", "morning sun", etc.
     // and we know the previous time, compute the minutes needed to reach
-    // the appropriate hour. This handles large time jumps like noon → evening.
+    // the appropriate hour. Handles both same-day and overnight jumps.
     if (prevHour24 !== null) {
         // "evening" / "dusk" / "sunset" → ~17:00-18:00
         if (/\b(?:the\s+)?evening\b(?:\s+(?:air|sky|sun|light|breeze|chill|glow|hours?))?/.test(t) ||
@@ -189,6 +210,9 @@ function estimateMinutesFromContent(text, prevTimeStr) {
             const target = r(17, 18); // 5-6 PM
             if (prevHour24 < target) {
                 return (target - prevHour24) * 60 + r(0, 30);
+            } else if (prevHour24 >= 22) {
+                // Overnight: late night → next evening (rare but handle it)
+                return (24 - prevHour24 + target) * 60 + r(0, 30);
             }
         }
         // "afternoon" → ~13:00-15:00
@@ -196,13 +220,20 @@ function estimateMinutesFromContent(text, prevTimeStr) {
             const target = r(13, 15);
             if (prevHour24 < target) {
                 return (target - prevHour24) * 60 + r(0, 30);
+            } else if (prevHour24 >= 20) {
+                // Overnight: night → next afternoon
+                return (24 - prevHour24 + target) * 60 + r(0, 30);
             }
         }
-        // "morning" / "dawn" / "sunrise" → ~7:00-9:00
-        if (/\b(?:the\s+)?(?:morning|dawn|sunrise)\b(?:\s+(?:air|sun|light|breeze|chill|dew|hours?))?/.test(t)) {
+        // "morning" / "dawn" / "sunrise" / "awaken" / "wake up" → ~7:00-9:00
+        if (/\b(?:the\s+)?(?:morning|dawn|sunrise)\b/.test(t) ||
+            /\b(?:awaken(?:ed|s|ing)?|wak(?:e[sd]?|ing)\s+up|woke\s+up)\b/.test(t)) {
             const target = r(7, 9);
             if (prevHour24 < target) {
                 return (target - prevHour24) * 60 + r(0, 30);
+            } else if (prevHour24 >= 17) {
+                // Overnight: evening/night → next morning
+                return (24 - prevHour24 + target) * 60 + r(0, 30);
             }
         }
         // "night" / "midnight" / "late at night" → ~21:00-23:00
@@ -214,7 +245,7 @@ function estimateMinutesFromContent(text, prevTimeStr) {
         }
     }
 
-    if (/\b(hours?\s+later|next\s+(?:day|morning|afternoon|evening|night)|the\s+following\s+(?:day|morning)|woke?\s+up|fell\s+asleep|overnight|days?\s+later)\b/.test(t)) {
+    if (/\b(hours?\s+later|next\s+(?:day|morning|afternoon|evening|night)|the\s+following\s+(?:day|morning)|woke?\s+up|awaken(?:ed)?|fell\s+asleep|overnight|days?\s+later|morning\s+comes?|morning\s+(?:light|came))\b/.test(t)) {
         return r(60, 90);
     }
     if (/\b(walk(?:ed|s|ing)|ran\b|running|arriv(?:ed|es|ing)|depart(?:ed)|left\s+(?:the|a|her|his|their|your)\b|head(?:ed|ing)\s+(?:to\b|towards?\b|for\b|back\b)|travel(?:led|ing)?|drove\b|driv(?:es|ing)|riding|climb(?:ed|ing)|descend(?:ed|ing)|jogg(?:ed|ing)|march(?:ed|ing)|stroll(?:ed|ing)|wander(?:ed|ing))\b/.test(t)) {
