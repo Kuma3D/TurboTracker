@@ -865,7 +865,24 @@ async function regenTracker(mesId) {
         const heartLo    = heartKnown ? Math.max(0,     prevHeart - maxShift) : 0;
         const heartHi    = heartKnown ? Math.min(99999, prevHeart + maxShift) : 99999;
 
-        ttDebug(`  regen #${mesId}: prevHeart=${prevHeart} range=[${heartLo},${heartHi}] prevTime="${regenPrevTime || 'none'}"`);
+        // Check if the CURRENT message has STTracker data — its characters are
+        // ground truth for this message and must override whatever the previous tracker had.
+        const currentSTData = tryImportSTTracker(msg);
+        const prevTrackerObj = getMostRecentTracker(ctx.chat, mesId);
+
+        // Build the character template for the prompt — prefer current message's
+        // STTracker characters, then existing tt_tracker characters, then previous tracker.
+        const currentChars = currentSTData?.characters
+            || msg.extra?.tt_tracker?.characters
+            || prevTrackerObj?.characters
+            || [];
+        const charsTemplate = currentChars.length
+            ? currentChars
+                .map(c => `- name: ${c.name} | description: ${c.description || '???'} | outfit: ${c.outfit || '???'} | state: ${c.state || '???'} | position: ${c.position || '???'}`)
+                .join('\n')
+            : '- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position';
+
+        ttDebug(`  regen #${mesId}: prevHeart=${prevHeart} range=[${heartLo},${heartHi}] prevTime="${regenPrevTime || 'none'}" chars=${currentChars.map(c=>c.name).join(',') || 'none'}`);
         let genPrompt;
         let regenNudge    = 0;
         let regenUserTime = null;
@@ -896,7 +913,7 @@ location: Full location description
 weather: Weather description, Temperature
 heart: ${prevHeart}
 characters:
-- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
+${charsTemplate}
 [/TRACKER]`;
         } else {
             // AI message: infer from conversation context up to (and including) this message only —
@@ -924,7 +941,7 @@ location: Full location description
 weather: Weather description, Temperature
 heart: integer_value between ${heartLo} and ${heartHi}
 characters:
-- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position
+${charsTemplate}
 [/TRACKER]`;
         }
 
@@ -947,17 +964,21 @@ characters:
         ttDebug(`  regen #${mesId}: parsed=${data ? `time="${data.time}" heart=${data.heart}` : 'null (no [TRACKER] block)'}`);
 
         // Fallback: if the AI returned roleplay instead of a tracker block,
-        // clone the existing/previous tracker and regenerate heart via heuristic
+        // use the current message's STTracker data if available, otherwise
+        // clone the existing tracker — but always prefer current-message characters.
         if (!data) {
             ttDebug(`  regen #${mesId}: AI returned no tracker block — using fallback`);
             const existingTracker = msg.extra?.tt_tracker;
-            const prevTrackerObj  = getMostRecentTracker(ctx.chat, mesId);
-            const base = existingTracker || prevTrackerObj;
 
-            if (base) {
-                data = { ...base };
+            if (currentSTData) {
+                // Current message has STTracker data — use it as the base
+                data = { ...currentSTData };
+                ttDebug(`  regen #${mesId}: using current msg STTracker (chars=${(data.characters||[]).map(c=>c.name).join(',')})`);
+            } else if (existingTracker) {
+                data = { ...existingTracker, characters: [...(existingTracker.characters || [])] };
+            } else if (prevTrackerObj) {
+                data = { ...prevTrackerObj, characters: [...(prevTrackerObj.characters || [])] };
             } else {
-                // No tracker anywhere — build a minimal one
                 data = {
                     time:       regenUserTime || (regenPrevTime ? advanceTimeString(regenPrevTime, 3) : 'Unknown'),
                     location:   'Unknown',
@@ -965,6 +986,12 @@ characters:
                     heart:      prevHeart,
                     characters: [],
                 };
+            }
+
+            // Even if we cloned from existing/prev, override characters with
+            // current message's STTracker characters when available
+            if (currentSTData?.characters?.length && data !== currentSTData) {
+                data.characters = [...currentSTData.characters];
             }
 
             // Advance time for the fallback
@@ -1597,13 +1624,19 @@ ${prefilledCharsText}
                         renderMessageTracker(idx);
                     } else {
                         // Both tracker fills failed — clone previous tracker with our computed time
+                        // and generate heart via heuristic
                         ttDebug(`  #${idx} P4 fallback: cloning prev tracker, time="${prefilledTime}"`);
                         const fallback = prevTrackerObj
-                            ? { ...prevTrackerObj, time: prefilledTime, heart: heartLocked ? lockedHeartVal : (prevTrackerObj.heart ?? populatePrevHeart) }
-                            : { time: prefilledTime, location: 'Unknown', weather: 'Unknown', heart: heartLocked ? lockedHeartVal : populatePrevHeart, characters: [] };
-                        if (!heartLocked && fallback.heart !== null) {
-                            s.heartPoints = parseInt(fallback.heart, 10) || populatePrevHeart;
+                            ? { ...prevTrackerObj, time: prefilledTime, characters: [...(prevTrackerObj.characters || [])] }
+                            : { time: prefilledTime, location: 'Unknown', weather: 'Unknown', heart: null, characters: [] };
+
+                        if (heartLocked) {
+                            fallback.heart = lockedHeartVal;
+                        } else {
+                            setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
+                            fallback.heart = await generateHeartValue(msg.mes, populatePrevHeart, populateMaxShift);
                         }
+                        s.heartPoints = parseInt(fallback.heart, 10) || populatePrevHeart;
                         msg.extra = msg.extra || {};
                         msg.extra.tt_tracker = fallback;
                         renderMessageTracker(idx);
