@@ -941,30 +941,75 @@ characters:
             injectPrompt(true);
         }
 
-        const data = parseTrackerBlock(response);
+        ttDebug(`  regen #${mesId}: raw response="${(response || '').slice(0, 200).replace(/\n/g, '\\n')}"`);
+
+        let data = parseTrackerBlock(response);
         ttDebug(`  regen #${mesId}: parsed=${data ? `time="${data.time}" heart=${data.heart}` : 'null (no [TRACKER] block)'}`);
-        if (data) {
-            if (msg.is_user) {
-                // Hard lock heart and time on user messages — we computed both, AI must not override them
-                data.heart = prevHeart;
-                if (regenPrevTime) data.time = advanceTimeString(regenPrevTime, regenNudge);
+
+        // Fallback: if the AI returned roleplay instead of a tracker block,
+        // clone the existing/previous tracker and regenerate heart via heuristic
+        if (!data) {
+            ttDebug(`  regen #${mesId}: AI returned no tracker block — using fallback`);
+            const existingTracker = msg.extra?.tt_tracker;
+            const prevTrackerObj  = getMostRecentTracker(ctx.chat, mesId);
+            const base = existingTracker || prevTrackerObj;
+
+            if (base) {
+                data = { ...base };
             } else {
-                if (data.heart !== null) {
-                    data.heart = heartKnown
-                        ? clampHeart(data.heart, prevHeart, maxShift)
-                        : Math.max(0, Math.min(99999, parseInt(data.heart, 10) || 0));
-                    s.heartPoints = data.heart;
+                // No tracker anywhere — build a minimal one
+                data = {
+                    time:       regenUserTime || (regenPrevTime ? advanceTimeString(regenPrevTime, 3) : 'Unknown'),
+                    location:   'Unknown',
+                    weather:    'Unknown',
+                    heart:      prevHeart,
+                    characters: [],
+                };
+            }
+
+            // Advance time for the fallback
+            if (!msg.is_user && regenPrevTime) {
+                const nudge = estimateMinutesFromContent(msg.mes || '');
+                data.time = advanceTimeString(regenPrevTime, nudge);
+            }
+        }
+
+        if (msg.is_user) {
+            // Hard lock heart and time on user messages
+            data.heart = prevHeart;
+            if (regenPrevTime) data.time = advanceTimeString(regenPrevTime, regenNudge);
+        } else {
+            // For AI messages: if the AI provided a valid heart in the tracker block, clamp it.
+            // Otherwise generate via hybrid (AI + heuristic fallback).
+            if (data.heart !== null && data.heart !== undefined && !isNaN(parseInt(data.heart, 10))) {
+                data.heart = heartKnown
+                    ? clampHeart(data.heart, prevHeart, maxShift)
+                    : Math.max(0, Math.min(99999, parseInt(data.heart, 10) || 0));
+            } else {
+                ttDebug(`  regen #${mesId}: generating heart via generateHeartValue (prev=${prevHeart})`);
+                setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
+                try {
+                    data.heart = await generateHeartValue(msg.mes, prevHeart, maxShift);
+                } finally {
+                    injectPrompt(true);
                 }
             }
-            msg.extra = msg.extra || {};
-            msg.extra.tt_tracker = data;
-            await ctx.saveChat();
-            saveSettingsDebounced();
-            renderMessageTracker(mesId);
+            s.heartPoints = parseInt(data.heart, 10) || 0;
         }
+
+        msg.extra = msg.extra || {};
+        msg.extra.tt_tracker = data;
+        await ctx.saveChat();
+        saveSettingsDebounced();
+        renderMessageTracker(mesId);
+        ttDebug(`  regen #${mesId}: done — time="${data.time}" heart=${data.heart}`);
     } catch (err) {
         console.warn(`[TurboTracker] Regen failed for message #${mesId}:`, err);
+        ttDebug(`  regen #${mesId}: ERROR ${err.message}`);
         injectPrompt(true); // ensure prompt is restored on error too
+    } finally {
+        // Always restore the button — renderMessageTracker rebuilds the HTML,
+        // but if it didn't run (error/early exit), re-enable the old button
         btn.prop('disabled', false).html('<i class="fa-solid fa-rotate"></i> Regenerate Tracker');
     }
 }
