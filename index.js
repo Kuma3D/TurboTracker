@@ -271,6 +271,9 @@ function detectCharactersInMessage(chat, mesId) {
 
     return found.length > 0 ? found : null;
 }
+
+/**
+ * Keyword-based heuristic for estimating heart change from message content.
  * Returns a signed integer delta.  All values are fractions of maxShift —
  * the absolute value of the return will NEVER exceed maxShift.
  *
