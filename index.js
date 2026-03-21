@@ -154,9 +154,58 @@ function parseMinuteOffset(val) {
  *   3. Meals / grooming / tasks         → 15 min
  *   4. Default casual exchange          → 3–5 min scaled by message length
  */
-function estimateMinutesFromContent(text) {
+function estimateMinutesFromContent(text, prevTimeStr) {
     const t = (text || '').toLowerCase();
     const r = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
+
+    // ── Parse the previous time into 24h hours for time-of-day jumps ──
+    let prevHour24 = null;
+    if (prevTimeStr) {
+        const tm = prevTimeStr.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+        if (tm) {
+            let h = parseInt(tm[1], 10);
+            const p = tm[3].toUpperCase();
+            if (p === 'PM' && h !== 12) h += 12;
+            if (p === 'AM' && h === 12) h = 0;
+            prevHour24 = h;
+        }
+    }
+
+    // ── Time-of-day keywords — jump to the stated time of day ──
+    // If the text explicitly says "evening air", "morning sun", etc.
+    // and we know the previous time, compute the minutes needed to reach
+    // the appropriate hour. This handles large time jumps like noon → evening.
+    if (prevHour24 !== null) {
+        // "evening" / "dusk" / "sunset" → ~17:00-18:00
+        if (/\b(?:the\s+)?evening\b(?:\s+(?:air|sky|sun|light|breeze|chill|glow|hours?))?/.test(t) ||
+            /\b(?:dusk|sunset|sundown)\b/.test(t)) {
+            const target = r(17, 18); // 5-6 PM
+            if (prevHour24 < target) {
+                return (target - prevHour24) * 60 + r(0, 30);
+            }
+        }
+        // "afternoon" → ~13:00-15:00
+        if (/\b(?:the\s+)?afternoon\b(?:\s+(?:sun|light|heat|breeze|hours?))?/.test(t)) {
+            const target = r(13, 15);
+            if (prevHour24 < target) {
+                return (target - prevHour24) * 60 + r(0, 30);
+            }
+        }
+        // "morning" / "dawn" / "sunrise" → ~7:00-9:00
+        if (/\b(?:the\s+)?(?:morning|dawn|sunrise)\b(?:\s+(?:air|sun|light|breeze|chill|dew|hours?))?/.test(t)) {
+            const target = r(7, 9);
+            if (prevHour24 < target) {
+                return (target - prevHour24) * 60 + r(0, 30);
+            }
+        }
+        // "night" / "midnight" / "late at night" → ~21:00-23:00
+        if (/\b(?:the\s+)?(?:night(?:\s+(?:air|sky|breeze))?|midnight|late\s+at\s+night)\b/.test(t)) {
+            const target = r(21, 23);
+            if (prevHour24 < target) {
+                return (target - prevHour24) * 60 + r(0, 30);
+            }
+        }
+    }
 
     if (/\b(hours?\s+later|next\s+(?:day|morning|afternoon|evening|night)|the\s+following\s+(?:day|morning)|woke?\s+up|fell\s+asleep|overnight|days?\s+later)\b/.test(t)) {
         return r(60, 90);
@@ -294,92 +343,6 @@ function detectCharactersInMessage(chat, mesId) {
  * @param {string} prevLocation  - The previous tracker's location (for context).
  * @returns {string|null}
  */
-function extractLocationFromText(text, prevLocation) {
-    if (!text) return null;
-    const t = text.toLowerCase();
-
-    // ── Detect the LAST room/area the character enters or is in ──
-    // We scan for all "in/into/at/entered the [place]" patterns and
-    // take the LAST match (most recent scene position in the narrative).
-    const roomTypes = [
-        'kitchen', 'bedroom', 'living room', 'bathroom', 'hallway',
-        'dining room', 'study', 'office', 'library', 'attic', 'basement',
-        'cellar', 'garage', 'porch', 'balcony', 'foyer', 'parlor',
-        'nursery', 'pantry', 'laundry room', 'courtyard', 'garden',
-        'throne room', 'war room', 'common room', 'barracks', 'armory',
-    ];
-    const buildingTypes = [
-        'house', 'home', 'apartment', 'inn', 'tavern', 'pub', 'bar',
-        'restaurant', 'cafe', 'shop', 'store', 'market', 'church',
-        'temple', 'shrine', 'palace', 'castle', 'manor', 'school',
-        'academy', 'hospital', 'clinic', 'station', 'headquarters',
-        'cabin', 'cottage', 'hut', 'tent', 'tower', 'fortress',
-        'guild', 'warehouse', 'factory', 'forge', 'smithy', 'stable',
-    ];
-    const outdoorTypes = [
-        'forest', 'woods', 'clearing', 'mountain', 'hill', 'river',
-        'stream', 'lake', 'pond', 'beach', 'shore', 'cave', 'canyon',
-        'valley', 'field', 'meadow', 'park', 'bridge', 'road', 'path',
-        'trail', 'street', 'alley', 'plaza', 'square', 'dock', 'pier',
-        'waterfall', 'cliff', 'ridge', 'swamp', 'desert', 'oasis',
-    ];
-
-    const allPlaces = [...roomTypes, ...buildingTypes, ...outdoorTypes];
-    const placePattern = allPlaces.map(p => p.replace(/\s+/g, '\\s+')).join('|');
-
-    // Match "into/in/at/entered/inside the [adj] [adj] [place]" — capture the place.
-    // Allow up to 2 adjectives between the determiner and the place noun
-    // so phrases like "at the local bar" and "in the small inn room" match.
-    const placeRegex = new RegExp(
-        `(?:(?:walk|step|go|went|head|mov|pad|rush|hurr|sneak|creep|wander|stroll)(?:ed|s|ing)?\\s+)?(?:into|in|at|inside|entered?|through)\\s+(?:the|our|my|his|her|their|a|an)\\s+(?:\\w+\\s+){0,2}(${placePattern})`,
-        'gi'
-    );
-
-    let lastPlaceMatch = null;
-    let match;
-    while ((match = placeRegex.exec(t)) !== null) {
-        lastPlaceMatch = match[1].trim();
-    }
-
-    // Also check for "arrive/return/come/get home/back" patterns
-    const homeMatch = t.match(/(?:walk|head|go|went|return|came|come|arriv|get|got)(?:ed|s|ing)?\s+(?:back\s+)?(?:home|to\s+(?:our|my|the)\s+(?:house|home|place|apartment))/i);
-
-    // Determine the best location string
-    let detectedLocation = null;
-
-    if (lastPlaceMatch || homeMatch) {
-        // Capitalize the place name
-        const place = lastPlaceMatch
-            ? lastPlaceMatch.replace(/\b\w/g, c => c.toUpperCase())
-            : 'Home';
-
-        // Try to add context from prev location (e.g. "Kitchen, Lockhart home, Nibelheim")
-        // Extract the town/city/region from prevLocation if available
-        let region = '';
-        if (prevLocation) {
-            // Look for town/city names at the end of prevLocation
-            const parts = prevLocation.split(/,\s*/);
-            if (parts.length > 1) {
-                region = ', ' + parts.slice(-1).join(', ');
-            }
-        }
-
-        if (homeMatch && lastPlaceMatch) {
-            // They arrived home AND we know which room → "Kitchen, [character] home[, region]"
-            detectedLocation = `${place}${region}`;
-        } else if (homeMatch) {
-            detectedLocation = `Home${region}`;
-        } else {
-            detectedLocation = `${place}${region}`;
-        }
-    }
-
-    if (detectedLocation) {
-        ttDebug(`extractLocationFromText: detected="${detectedLocation}" (place=${lastPlaceMatch}, home=${!!homeMatch})`);
-    }
-    return detectedLocation;
-}
-
 /**
  * Returns a signed integer delta.  All values are fractions of maxShift —
  * the absolute value of the return will NEVER exceed maxShift.
@@ -1072,8 +1035,10 @@ async function regenTracker(mesId) {
         let regenUserTime = null;
 
         if (msg.is_user) {
-            // User message: compute time ourselves (prev + 2-5 min) — never let the AI set it.
-            regenNudge    = 2 + Math.floor(Math.random() * 4); // 2–5 min
+            // User message: compute time ourselves using content heuristic.
+            // This detects time-of-day keywords ("evening air", "morning sun")
+            // and computes appropriate jumps instead of always adding 2-5 min.
+            regenNudge    = estimateMinutesFromContent(msg.mes || '', regenPrevTime);
             regenUserTime = regenPrevTime
                 ? advanceTimeString(regenPrevTime, regenNudge)
                 : 'h:MM AM/PM; MM/DD/YYYY (DayOfWeek)';
@@ -1082,7 +1047,7 @@ async function regenTracker(mesId) {
             genPrompt =
 `[OOC: Based on the user's message below and the previous tracker state, produce an updated tracker reflecting any scene changes the user's message logically implies. Output ONLY the tracker block — no other text.
 
-IMPORTANT: Location must reflect where the scene takes place at the END of this message. If the user moved to a new location (entered a building, went to a bar, arrived home, etc.), use the NEW location — not the previous one.
+IMPORTANT: Location must reflect where the scene takes place at the BEGINNING of this message — the setting where the action starts. Do NOT use locations from previous messages.
 The time is already set — do NOT change it.
 heart must remain exactly ${prevHeart} — only the character's emotions change this, never the user.]
 
@@ -1094,7 +1059,7 @@ ${msg.mes}
 
 [TRACKER]
 time: ${regenUserTime}
-location: Where the scene takes place at the END of this message
+location: Where the scene takes place at the BEGINNING of this message
 weather: Weather description, Temperature
 heart: ${prevHeart}
 characters:
@@ -1111,9 +1076,9 @@ ${charsTemplate}
                 .join('\n\n');
 
             genPrompt =
-`[OOC: Based on the message below, determine the tracker state. Focus on WHERE the characters are and WHAT they are doing at the END of this message — not earlier in the conversation. Output ONLY the tracker block — no other text.
+`[OOC: Based on the message below, determine the tracker state. Focus on WHERE the characters are at the BEGINNING of this message — the setting where the scene starts. Output ONLY the tracker block — no other text.
 
-IMPORTANT: Location must reflect where the scene takes place in THIS message. If characters moved to a new location, use the NEW location.
+IMPORTANT: Location must reflect where the scene takes place at the START of THIS message. Do NOT use locations from previous messages or later in the conversation.
 heart must be between ${heartLo} and ${heartHi}${heartKnown ? ` (previous value was ${prevHeart})` : ' — heart has not been established yet, infer an appropriate value from the narrative'}.]
 
 Previous tracker state (for reference — update location if the scene moved):
@@ -1123,7 +1088,7 @@ ${contextText}
 
 [TRACKER]
 time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
-location: Where the scene takes place at the END of this message
+location: Where the scene takes place at the START of this message
 weather: Weather description, Temperature
 heart: integer_value between ${heartLo} and ${heartHi}
 characters:
@@ -1253,16 +1218,17 @@ Characters to describe: ${charNames}
 
         // ── Extract location/weather from the current message ──
         // The full tracker prompt often returns wrong locations because it
-        // includes 6 messages of prior context. STTracker data is also stale.
+        // includes prior context or the previous tracker's location.
         // Use a focused prompt that looks at ONLY the current message text.
-        if (!msg.is_user && msg.mes) {
+        // Runs for BOTH user and AI messages.
+        if (msg.mes) {
             const locPrompt =
 `[OOC: Based on ONLY this scene excerpt, answer two questions.
-Line 1: Where does this scene take place? Give a specific location name and brief description.
+Line 1: Where does this scene take place at the BEGINNING? Give the specific location where the action starts (e.g. a room, building, or area — not where they travel to later).
 Line 2: What is the weather/temperature?
 Reply with ONLY two lines, no other text. Example:
-Lockhart family kitchen, Nibelheim village
-Warm afternoon, sunny with clear skies]
+Inn room, Nibelheim village
+Cool evening, mountain breeze]
 
 "${(msg.mes || '').slice(0, 800)}"`;
 
@@ -1299,21 +1265,6 @@ Warm afternoon, sunny with clear skies]
             }
         }
 
-        // ── Text-based location heuristic (final override for ALL messages) ──
-        // If the message text contains clear movement/arrival patterns
-        // (e.g. "walked into the kitchen", "arrived home"), use that
-        // as the definitive location — it's more reliable than the AI
-        // which often picks up locations from prior context.
-        // Runs for BOTH user and AI messages.
-        if (msg.mes) {
-            const prevLoc = prevTrackerObj?.location || data.location || '';
-            const heuristicLoc = extractLocationFromText(msg.mes, prevLoc);
-            if (heuristicLoc) {
-                data.location = heuristicLoc;
-                ttDebug(`  regen #${mesId}: heuristic location override="${heuristicLoc}"`);
-            }
-        }
-
         // ── Always enforce time ourselves — never trust the AI's time ──
         // The AI regularly returns wildly wrong times (hours off, wrong period).
         // Compute from previous tracker time + heuristic minute advance.
@@ -1324,7 +1275,7 @@ Warm afternoon, sunny with clear skies]
             }
         } else {
             if (regenPrevTime) {
-                const nudge = estimateMinutesFromContent(msg.mes || '');
+                const nudge = estimateMinutesFromContent(msg.mes || '', regenPrevTime);
                 data.time = advanceTimeString(regenPrevTime, nudge);
                 ttDebug(`  regen #${mesId}: enforced time: prev="${regenPrevTime}" +${nudge}min → "${data.time}"`);
             }
@@ -1877,7 +1828,7 @@ ${msg.mes.slice(0, 600)}`;
             }
 
             if (advanceMinutes === null) {
-                advanceMinutes = estimateMinutesFromContent(msg.mes || '');
+                advanceMinutes = estimateMinutesFromContent(msg.mes || '', populatePrevTime);
                 ttDebug(`  #${idx} P4: heuristic minutes=${advanceMinutes} (msgLen=${(msg.mes || '').length})`);
             }
 
