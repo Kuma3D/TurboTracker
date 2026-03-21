@@ -1080,26 +1080,127 @@ ${charsTemplate}
             }
         }
 
-        // ── Always override characters with text-detected characters ──
-        // The AI, STTracker, and cloned trackers all produce stale/wrong
-        // character lists. Text detection is the most reliable source.
+        // ── Merge character details from the AI/existing data into detected characters ──
+        // Text detection determines WHO is present (the character list), but
+        // the AI or existing tracker may have useful detail data (description,
+        // outfit, state, position) that we want to keep. Build a lookup from
+        // whatever data source we have and merge into the detected characters.
         if (detectedChars) {
-            data.characters = detectedChars.map(c => ({...c}));
-            ttDebug(`  regen #${mesId}: characters overridden by text detection: ${detectedChars.map(c=>c.name).join(',')}`);
+            // Build a lookup of character details from the data source (AI response or fallback)
+            const detailLookup = new Map();
+            for (const c of (data.characters || [])) {
+                if (c.name) detailLookup.set(c.name, c);
+            }
+
+            data.characters = detectedChars.map(dc => {
+                const detail = detailLookup.get(dc.name);
+                return {
+                    name:        dc.name,
+                    description: dc.description || detail?.description || '',
+                    outfit:      dc.outfit      || detail?.outfit      || '',
+                    state:       dc.state       || detail?.state       || '',
+                    position:    dc.position    || detail?.position    || '',
+                };
+            });
+            ttDebug(`  regen #${mesId}: characters from text detection: ${data.characters.map(c => `${c.name}(desc=${c.description ? 'yes' : 'no'})`).join(',')}`);
+
+            // ── Fill blank character descriptions via focused AI prompt ──
+            const blankChars = data.characters.filter(c => !c.description && !c.outfit);
+            if (blankChars.length > 0 && !msg.is_user && msg.mes) {
+                const charNames = blankChars.map(c => c.name).join(', ');
+                const charDescPrompt =
+`[OOC: Based on this scene excerpt, describe each listed character. Reply with ONLY the formatted lines below — no story text, no dialogue, nothing else.
+Format per character (one line each):
+Name | description | outfit | state | position
+Example:
+Brian Lockhart | Middle-aged man, brown hair, weathered face | Brown vest, work pants, boots | Concerned, protective | Standing in the kitchen doorway]
+
+Characters to describe: ${charNames}
+
+"${(msg.mes || '').slice(0, 800)}"`;
+
+                try {
+                    setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
+                    const charResp = await generateQuietPrompt(charDescPrompt, false, true);
+                    injectPrompt(true);
+                    ttDebug(`  regen #${mesId}: charDesc raw="${charResp.slice(0, 300).replace(/\n/g, '\\n')}"`);
+
+                    const looksLikeRoleplay = charResp.startsWith('(') || charResp.startsWith('*') || charResp.startsWith('"') || charResp.length > 600;
+                    if (!looksLikeRoleplay) {
+                        const respLines = charResp.trim().split('\n').map(l => l.trim()).filter(l => l.length > 0);
+                        for (const line of respLines) {
+                            const parts = line.split('|').map(p => p.trim());
+                            if (parts.length >= 3) {
+                                const matchName = parts[0];
+                                const target = data.characters.find(c =>
+                                    c.name.toLowerCase() === matchName.toLowerCase() ||
+                                    c.name.split(/\s+/)[0].toLowerCase() === matchName.split(/\s+/)[0].toLowerCase()
+                                );
+                                if (target) {
+                                    if (!target.description && parts[1]) target.description = parts[1];
+                                    if (!target.outfit && parts[2])      target.outfit      = parts[2];
+                                    if (!target.state && parts[3])       target.state       = parts[3];
+                                    if (!target.position && parts[4])    target.position    = parts[4];
+                                    ttDebug(`  regen #${mesId}: filled char "${target.name}" desc="${target.description ? 'yes' : 'no'}"`);
+                                }
+                            }
+                        }
+                    } else {
+                        ttDebug(`  regen #${mesId}: charDesc returned roleplay, keeping blank fields`);
+                    }
+                } catch (e) {
+                    ttDebug(`  regen #${mesId}: charDesc ERROR ${e.message}`);
+                    injectPrompt(true);
+                }
+            }
         }
 
-        // ── Override location/weather with current message's STTracker data ──
-        // STTracker location/weather is message-specific (captured at the time
-        // the message was created) and more reliable than cloned data from
-        // existing/previous trackers which may be from a different scene.
-        if (currentSTData) {
-            if (currentSTData.location && !isBlankValue(currentSTData.location)) {
-                data.location = currentSTData.location;
+        // ── Extract location/weather from the current message ──
+        // The full tracker prompt often returns wrong locations because it
+        // includes 6 messages of prior context. STTracker data is also stale.
+        // Use a focused prompt that looks at ONLY the current message text.
+        if (!msg.is_user && msg.mes) {
+            const locPrompt =
+`[OOC: Based on ONLY this scene excerpt, answer two questions.
+Line 1: Where does this scene take place? Give a specific location name and brief description.
+Line 2: What is the weather/temperature?
+Reply with ONLY two lines, no other text. Example:
+Lockhart family kitchen, Nibelheim village
+Warm afternoon, sunny with clear skies]
+
+"${(msg.mes || '').slice(0, 800)}"`;
+
+            try {
+                setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
+                const locResp = await generateQuietPrompt(locPrompt, false, true);
+                injectPrompt(true);
+                ttDebug(`  regen #${mesId}: locPrompt raw="${locResp.slice(0, 200).replace(/\n/g, '\\n')}"`);
+
+                // Try to extract location/weather from the response.
+                // Accept if the response is short (no roleplay) and has real content.
+                const lines = locResp.trim().split('\n').map(l => l.trim()).filter(l => l.length > 0);
+                const looksLikeRoleplay = locResp.startsWith('(') || locResp.startsWith('*') || locResp.startsWith('"') || locResp.length > 400;
+
+                if (!looksLikeRoleplay && lines.length >= 1) {
+                    const locLine = lines[0].replace(/^(?:location|loc|1)[:\.\)]\s*/i, '').trim();
+                    if (locLine.length > 3 && locLine.length < 200) {
+                        data.location = locLine;
+                        ttDebug(`  regen #${mesId}: extracted location="${locLine}"`);
+                    }
+                    if (lines.length >= 2) {
+                        const wxLine = lines[1].replace(/^(?:weather|wx|2)[:\.\)]\s*/i, '').trim();
+                        if (wxLine.length > 3 && wxLine.length < 200) {
+                            data.weather = wxLine;
+                            ttDebug(`  regen #${mesId}: extracted weather="${wxLine}"`);
+                        }
+                    }
+                } else {
+                    ttDebug(`  regen #${mesId}: locPrompt returned roleplay, keeping existing location`);
+                }
+            } catch (e) {
+                ttDebug(`  regen #${mesId}: locPrompt ERROR ${e.message}`);
+                injectPrompt(true);
             }
-            if (currentSTData.weather && !isBlankValue(currentSTData.weather)) {
-                data.weather = currentSTData.weather;
-            }
-            ttDebug(`  regen #${mesId}: STTracker overrides — loc="${data.location}" weather="${data.weather}"`);
         }
 
         // ── Always enforce time ourselves — never trust the AI's time ──
