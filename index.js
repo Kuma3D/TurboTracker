@@ -265,26 +265,29 @@ async function generateHeartValue(msgText, prevHeart, maxShift) {
     const prev  = parseInt(prevHeart, 10) || 0;
     const shift = Math.max(1, parseInt(maxShift, 10) || 2500);
 
+    // Round to nearest 100 — all heart changes must be clean multiples of 100
+    const r100 = v => Math.round(v / 100) * 100;
+
     // 1. Try extracting from inline text first (e.g. "Black Heart (500) 🖤")
     const inline = extractHeartFromText(msgText);
     if (inline !== null) {
         ttDebug(`generateHeartValue: inline extraction → ${inline}`);
-        return clampHeart(inline, prev, shift);
+        return r100(clampHeart(inline, prev, shift));
     }
 
     // 2. Try AI call — ask for a signed integer delta
     const prompt =
 `[OOC: Based on the following story excerpt, how does the character's romantic interest toward {{user}} change?
 Current heart value: ${prev} (scale: 0–99,999).
-Reply with ONLY a signed integer for the change amount.
+Reply with ONLY a signed integer for the change amount. Must be a multiple of 100.
 Positive = warmer/friendlier feelings. Negative = colder/hostile feelings.
 The change MUST be between -${shift} and +${shift}.
-Casual conversation: +${Math.round(shift * 0.2)} to +${Math.round(shift * 0.4)}.
-Kind/friendly interaction: +${Math.round(shift * 0.3)} to +${Math.round(shift * 0.5)}.
-Meaningful positive interaction: +${Math.round(shift * 0.5)} to +${Math.round(shift * 0.8)}.
-Major emotional event: +${Math.round(shift * 0.8)} to +${shift}.
-Negative interaction: -${Math.round(shift * 0.2)} to -${Math.round(shift * 0.7)}.
-Reply with ONLY a signed integer like +${Math.round(shift * 0.3)} or -${Math.round(shift * 0.3)}. No other text.]
+Casual conversation: +${r100(shift * 0.2)} to +${r100(shift * 0.4)}.
+Kind/friendly interaction: +${r100(shift * 0.3)} to +${r100(shift * 0.5)}.
+Meaningful positive interaction: +${r100(shift * 0.5)} to +${r100(shift * 0.8)}.
+Major emotional event: +${r100(shift * 0.8)} to +${r100(shift)}.
+Negative interaction: -${r100(shift * 0.2)} to -${r100(shift * 0.7)}.
+Reply with ONLY a signed integer like +${r100(shift * 0.3)} or -${r100(shift * 0.3)}. No other text.]
 
 "${(msgText || '').slice(0, 600)}"`;
 
@@ -295,11 +298,10 @@ Reply with ONLY a signed integer like +${Math.round(shift * 0.3)} or -${Math.rou
         if (match) {
             let delta = parseInt(match[1], 10);
             if (!isNaN(delta) && delta !== 0) {
-                // Clamp the AI's delta to ±maxShift
-                delta = Math.max(-shift, Math.min(shift, delta));
-                const newVal = Math.max(0, Math.min(99999, prev + delta));
-                ttDebug(`generateHeartValue: AI delta=${delta > 0 ? '+' : ''}${delta} → ${newVal}`);
-                return newVal;
+                delta = r100(Math.max(-shift, Math.min(shift, delta)));
+                const newVal = Math.max(0, Math.min(99900, prev + delta));
+                ttDebug(`generateHeartValue: AI delta=${delta > 0 ? '+' : ''}${delta} → ${r100(newVal)}`);
+                return r100(newVal);
             }
         }
         ttDebug(`generateHeartValue: AI returned no valid integer, falling back to heuristic`);
@@ -309,8 +311,8 @@ Reply with ONLY a signed integer like +${Math.round(shift * 0.3)} or -${Math.rou
 
     // 3. Heuristic fallback — keyword-based sentiment analysis
     //    estimateHeartDelta already returns values within ±maxShift
-    const delta = estimateHeartDelta(msgText, shift);
-    const newVal = Math.max(0, Math.min(99999, prev + delta));
+    const delta = r100(estimateHeartDelta(msgText, shift));
+    const newVal = r100(Math.max(0, Math.min(99900, prev + delta)));
     ttDebug(`generateHeartValue: heuristic delta=${delta > 0 ? '+' : ''}${delta} → ${newVal} (maxShift=${shift})`);
     return newVal;
 }
