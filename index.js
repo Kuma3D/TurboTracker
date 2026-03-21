@@ -286,7 +286,99 @@ function detectCharactersInMessage(chat, mesId) {
 }
 
 /**
- * Keyword-based heuristic for estimating heart change from message content.
+ * Try to extract a location from the message text by scanning for
+ * movement/arrival phrases and room/building indicators.
+ * Returns a location string or null if nothing clear was found.
+ *
+ * @param {string} text          - The message text to analyze.
+ * @param {string} prevLocation  - The previous tracker's location (for context).
+ * @returns {string|null}
+ */
+function extractLocationFromText(text, prevLocation) {
+    if (!text) return null;
+    const t = text.toLowerCase();
+
+    // ── Detect the LAST room/area the character enters or is in ──
+    // We scan for all "in/into/at/entered the [place]" patterns and
+    // take the LAST match (most recent scene position in the narrative).
+    const roomTypes = [
+        'kitchen', 'bedroom', 'living room', 'bathroom', 'hallway',
+        'dining room', 'study', 'office', 'library', 'attic', 'basement',
+        'cellar', 'garage', 'porch', 'balcony', 'foyer', 'parlor',
+        'nursery', 'pantry', 'laundry room', 'courtyard', 'garden',
+        'throne room', 'war room', 'common room', 'barracks', 'armory',
+    ];
+    const buildingTypes = [
+        'house', 'home', 'apartment', 'inn', 'tavern', 'pub', 'bar',
+        'restaurant', 'cafe', 'shop', 'store', 'market', 'church',
+        'temple', 'shrine', 'palace', 'castle', 'manor', 'school',
+        'academy', 'hospital', 'clinic', 'station', 'headquarters',
+        'cabin', 'cottage', 'hut', 'tent', 'tower', 'fortress',
+        'guild', 'warehouse', 'factory', 'forge', 'smithy', 'stable',
+    ];
+    const outdoorTypes = [
+        'forest', 'woods', 'clearing', 'mountain', 'hill', 'river',
+        'stream', 'lake', 'pond', 'beach', 'shore', 'cave', 'canyon',
+        'valley', 'field', 'meadow', 'park', 'bridge', 'road', 'path',
+        'trail', 'street', 'alley', 'plaza', 'square', 'dock', 'pier',
+        'waterfall', 'cliff', 'ridge', 'swamp', 'desert', 'oasis',
+    ];
+
+    const allPlaces = [...roomTypes, ...buildingTypes, ...outdoorTypes];
+    const placePattern = allPlaces.map(p => p.replace(/\s+/g, '\\s+')).join('|');
+
+    // Match "into/in/at/entered/inside the [place]" — capture the place
+    const placeRegex = new RegExp(
+        `(?:(?:walk|step|go|went|head|mov|pad|rush|hurr|sneak|creep|wander|stroll)(?:ed|s|ing)?\\s+)?(?:into|in|at|inside|entered?|through)\\s+(?:the|our|my|his|her|their|a|an)\\s+(${placePattern})`,
+        'gi'
+    );
+
+    let lastPlaceMatch = null;
+    let match;
+    while ((match = placeRegex.exec(t)) !== null) {
+        lastPlaceMatch = match[1].trim();
+    }
+
+    // Also check for "arrive/return/come/get home/back" patterns
+    const homeMatch = t.match(/(?:walk|head|go|went|return|came|come|arriv|get|got)(?:ed|s|ing)?\s+(?:back\s+)?(?:home|to\s+(?:our|my|the)\s+(?:house|home|place|apartment))/i);
+
+    // Determine the best location string
+    let detectedLocation = null;
+
+    if (lastPlaceMatch || homeMatch) {
+        // Capitalize the place name
+        const place = lastPlaceMatch
+            ? lastPlaceMatch.replace(/\b\w/g, c => c.toUpperCase())
+            : 'Home';
+
+        // Try to add context from prev location (e.g. "Kitchen, Lockhart home, Nibelheim")
+        // Extract the town/city/region from prevLocation if available
+        let region = '';
+        if (prevLocation) {
+            // Look for town/city names at the end of prevLocation
+            const parts = prevLocation.split(/,\s*/);
+            if (parts.length > 1) {
+                region = ', ' + parts.slice(-1).join(', ');
+            }
+        }
+
+        if (homeMatch && lastPlaceMatch) {
+            // They arrived home AND we know which room → "Kitchen, [character] home[, region]"
+            detectedLocation = `${place}${region}`;
+        } else if (homeMatch) {
+            detectedLocation = `Home${region}`;
+        } else {
+            detectedLocation = `${place}${region}`;
+        }
+    }
+
+    if (detectedLocation) {
+        ttDebug(`extractLocationFromText: detected="${detectedLocation}" (place=${lastPlaceMatch}, home=${!!homeMatch})`);
+    }
+    return detectedLocation;
+}
+
+/**
  * Returns a signed integer delta.  All values are fractions of maxShift —
  * the absolute value of the return will NEVER exceed maxShift.
  *
@@ -1006,28 +1098,29 @@ characters:
 ${charsTemplate}
 [/TRACKER]`;
         } else {
-            // AI message: infer from conversation context up to (and including) this message only —
-            // do NOT include messages after mesId, as those are "future" context for this point in time.
-            const start       = Math.max(0, mesId - 6);
+            // AI message: use only the current message + immediately preceding one.
+            // A larger context window (e.g. 6 messages) causes the AI to pick up
+            // locations, characters, and details from earlier scenes.
+            const start       = Math.max(0, mesId - 1);
             const contextMsgs = ctx.chat.slice(start, mesId + 1);
             const contextText = contextMsgs
                 .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
                 .join('\n\n');
 
             genPrompt =
-`[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
+`[OOC: Based on the message below, determine the tracker state. Focus on WHERE the characters are and WHAT they are doing at the END of this message — not earlier in the conversation. Output ONLY the tracker block — no other text.
 
-IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance by only a small, realistic amount — typically 1 to 10 minutes for a normal exchange, only more if the scene explicitly depicts a significant time skip. Do not jump hours without clear story justification.
+IMPORTANT: Location must reflect where the scene takes place in THIS message. If characters moved to a new location, use the NEW location.
 heart must be between ${heartLo} and ${heartHi}${heartKnown ? ` (previous value was ${prevHeart})` : ' — heart has not been established yet, infer an appropriate value from the narrative'}.]
 
-Previous tracker state:
+Previous tracker state (for reference — update location if the scene moved):
 ${prevTrackerText}
 
 ${contextText}
 
 [TRACKER]
 time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
-location: Full location description
+location: Where the scene takes place at the END of this message
 weather: Weather description, Temperature
 heart: integer_value between ${heartLo} and ${heartHi}
 characters:
@@ -1200,6 +1293,18 @@ Warm afternoon, sunny with clear skies]
             } catch (e) {
                 ttDebug(`  regen #${mesId}: locPrompt ERROR ${e.message}`);
                 injectPrompt(true);
+            }
+
+            // ── Text-based location heuristic (final override) ──
+            // If the message text contains clear movement/arrival patterns
+            // (e.g. "walked into the kitchen", "arrived home"), use that
+            // as the definitive location — it's more reliable than the AI
+            // which often picks up locations from prior context.
+            const prevLoc = prevTrackerObj?.location || data.location || '';
+            const heuristicLoc = extractLocationFromText(msg.mes, prevLoc);
+            if (heuristicLoc) {
+                data.location = heuristicLoc;
+                ttDebug(`  regen #${mesId}: heuristic location override="${heuristicLoc}"`);
             }
         }
 
