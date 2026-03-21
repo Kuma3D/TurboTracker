@@ -386,14 +386,14 @@ function getBestPrevContext(chat, beforeMesId) {
         const patched = !isBlankValue(ttTracker.time) ? ttTracker : { ...ttTracker, time: prevTime };
         return {
             trackerText: formatTrackerForPrompt(patched),
-            prevHeart:   parseInt(ttTracker.heart, 10) || 0,
+            prevHeart:   (ttTracker.heart !== null && ttTracker.heart !== undefined) ? parseInt(ttTracker.heart, 10) : null,
             prevTime,
         };
     }
 
     // No tt_tracker at all — build minimal context from raw STTracker data
     if (stTime) {
-        const synth = { time: stTime, location: null, weather: null, heart: 0, characters: [] };
+        const synth = { time: stTime, location: null, weather: null, heart: null, characters: [] };
         for (let i = beforeMesId - 1; i >= 0; i--) {
             const t = chat[i]?.tracker;
             if (t && typeof t === 'object' && Object.keys(t).length > 0) {
@@ -406,7 +406,7 @@ function getBestPrevContext(chat, beforeMesId) {
                 break;
             }
         }
-        return { trackerText: formatTrackerForPrompt(synth), prevHeart: 0, prevTime: stTime };
+        return { trackerText: formatTrackerForPrompt(synth), prevHeart: null, prevTime: stTime };
     }
 
     return { trackerText: 'None', prevHeart: 0, prevTime: null };
@@ -417,7 +417,10 @@ function getBestPrevContext(chat, beforeMesId) {
  */
 function formatTrackerForPrompt(data) {
     if (!data) return 'None';
-    let text = `time: ${data.time || 'Unknown'}\nlocation: ${data.location || 'Unknown'}\nweather: ${data.weather || 'Unknown'}\nheart: ${parseInt(data.heart, 10) || 0}`;
+    const heartDisplay = (data.heart !== null && data.heart !== undefined)
+        ? parseInt(data.heart, 10) || 0
+        : 'unknown (not yet established)';
+    let text = `time: ${data.time || 'Unknown'}\nlocation: ${data.location || 'Unknown'}\nweather: ${data.weather || 'Unknown'}\nheart: ${heartDisplay}`;
     if (data.characters && data.characters.length > 0) {
         text += '\ncharacters:';
         for (const c of data.characters) {
@@ -677,12 +680,7 @@ function processMessage(mesId) {
     const imported = tryImportSTTracker(msg);
     if (imported) {
         ttDebug(`  #${mesId} STTracker imported: time="${imported.time}"`);
-        // ST-Tracker doesn't include heart — carry the current baseline forward so
-        // the heart meter doesn't silently reset to 0.
-        if (imported.heart === null || imported.heart === undefined) {
-            imported.heart = s.heartPoints;
-        }
-        s.heartPoints = parseInt(imported.heart, 10) || 0;
+        // heart stays null — ST-Tracker has no heart data; regen/populate will fill it
         msg.extra = msg.extra || {};
         msg.extra.tt_tracker = imported;
         ctx.saveChat();
@@ -711,9 +709,11 @@ async function regenTracker(mesId) {
         const s        = getSettings();
         const maxShift = (Number(s.heartSensitivity) || 5) * 500;
 
-        const { trackerText: prevTrackerText, prevHeart, prevTime: regenPrevTime } = getBestPrevContext(ctx.chat, mesId);
-        const heartLo   = Math.max(0,     prevHeart - maxShift);
-        const heartHi   = Math.min(99999, prevHeart + maxShift);
+        const { trackerText: prevTrackerText, prevHeart: rawPrevHeart, prevTime: regenPrevTime } = getBestPrevContext(ctx.chat, mesId);
+        const heartKnown = rawPrevHeart !== null;
+        const prevHeart  = heartKnown ? rawPrevHeart : 0;
+        const heartLo    = heartKnown ? Math.max(0,     prevHeart - maxShift) : 0;
+        const heartHi    = heartKnown ? Math.min(99999, prevHeart + maxShift) : 99999;
 
         ttDebug(`  regen #${mesId}: prevHeart=${prevHeart} range=[${heartLo},${heartHi}] prevTime="${regenPrevTime || 'none'}"`);
         let genPrompt;
@@ -761,7 +761,7 @@ characters:
 `[OOC: Based on the conversation excerpt below, infer the tracker state at the moment of the last AI message. Use the previous tracker as your starting point and only update what the narrative logically requires. Output ONLY the tracker block — no other text.
 
 IMPORTANT: The time field is IN-STORY fiction time — NEVER the real-world current date or time. Start from the previous tracker time and advance by only a small, realistic amount — typically 1 to 10 minutes for a normal exchange, only more if the scene explicitly depicts a significant time skip. Do not jump hours without clear story justification.
-heart must be between ${heartLo} and ${heartHi} (previous value was ${prevHeart}).]
+heart must be between ${heartLo} and ${heartHi}${heartKnown ? ` (previous value was ${prevHeart})` : ' — heart has not been established yet, infer an appropriate value from the narrative'}.]
 
 Previous tracker state:
 ${prevTrackerText}
@@ -800,10 +800,9 @@ characters:
                 if (regenPrevTime) data.time = advanceTimeString(regenPrevTime, regenNudge);
             } else {
                 if (data.heart !== null) {
-                    // Clamp against prevHeart (the historical baseline), NOT s.heartPoints
-                    // (current latest value) — otherwise we'd be constraining relative to
-                    // a future state that didn't exist at the time of this message.
-                    data.heart = clampHeart(data.heart, prevHeart, maxShift);
+                    data.heart = heartKnown
+                        ? clampHeart(data.heart, prevHeart, maxShift)
+                        : Math.max(0, Math.min(99999, parseInt(data.heart, 10) || 0));
                     s.heartPoints = data.heart;
                 }
             }
@@ -1213,12 +1212,17 @@ ${fillCharsText}
             ttDebug(`  #${idx} P4: AI gen — prevTime="${populatePrevTime || 'none'}" prevHeart=${populatePrevHeart}`);
 
             const populateMaxShift = (Number(s.heartSensitivity) || 5) * 500;
-            const populateHeartLo = heartLocked ? lockedHeartVal : Math.max(0,     populatePrevHeart - populateMaxShift);
-            const populateHeartHi = heartLocked ? lockedHeartVal : Math.min(99999, populatePrevHeart + populateMaxShift);
+            const heartKnownForPopulate = populatePrevHeart !== null;
+            const populateHeartLo = heartLocked ? lockedHeartVal
+                                  : heartKnownForPopulate ? Math.max(0,     populatePrevHeart - populateMaxShift) : 0;
+            const populateHeartHi = heartLocked ? lockedHeartVal
+                                  : heartKnownForPopulate ? Math.min(99999, populatePrevHeart + populateMaxShift) : 99999;
 
             const heartInstruction = heartLocked
                 ? `heart must be exactly ${lockedHeartVal} — extracted directly from the message text.`
-                : `heart must be between ${populateHeartLo} and ${populateHeartHi} (previous value was ${populatePrevHeart}).`;
+                : heartKnownForPopulate
+                ? `heart must be between ${populateHeartLo} and ${populateHeartHi} (previous value was ${populatePrevHeart}).`
+                : `heart has not been established yet — infer an appropriate value from the narrative.`;
 
             // ── Step 1: Determine minute offset ───────────────────────────
             // Ask the AI for just a single integer — a much simpler task than a full tracker,
