@@ -281,8 +281,10 @@ function detectCharactersInMessage(chat, mesId) {
         name:        incoming.name,
         description: incoming.description || existing.description || '',
         outfit:      incoming.outfit      || existing.outfit      || '',
-        state:       incoming.state       || existing.state       || '',
-        position:    incoming.position    || existing.position    || '',
+        // State and position are scene-specific — do NOT carry over from
+        // other trackers. Only keep description and outfit (which are stable).
+        state:       '',
+        position:    '',
     });
     for (let i = 0; i < chat.length; i++) {
         const tt = chat[i]?.extra?.tt_tracker;
@@ -1164,24 +1166,30 @@ ${charsTemplate}
                 const detail = detailLookup.get(dc.name);
                 return {
                     name:        dc.name,
+                    // Description and outfit are stable across scenes — prefer roster data
                     description: dc.description || detail?.description || '',
                     outfit:      dc.outfit      || detail?.outfit      || '',
-                    state:       dc.state       || detail?.state       || '',
-                    position:    dc.position    || detail?.position    || '',
+                    // State and position are scene-specific — prefer AI response over roster
+                    state:       detail?.state    || '',
+                    position:    detail?.position || '',
                 };
             });
             ttDebug(`  regen #${mesId}: characters from text detection: ${data.characters.map(c => `${c.name}(desc=${c.description ? 'yes' : 'no'})`).join(',')}`);
 
-            // ── Fill blank character descriptions via focused AI prompt ──
-            const blankChars = data.characters.filter(c => !c.description && !c.outfit);
-            if (blankChars.length > 0 && !msg.is_user && msg.mes) {
-                const charNames = blankChars.map(c => c.name).join(', ');
+            // ── Fill blank character fields via focused AI prompt ──
+            // State and position are always blank from the roster (scene-specific),
+            // and some characters may also lack description/outfit.
+            // Ask the AI to fill in missing fields for all characters that need it.
+            const needsFill = data.characters.filter(c => !c.description || !c.outfit || !c.state || !c.position);
+            if (needsFill.length > 0 && msg.mes) {
+                const charNames = needsFill.map(c => c.name).join(', ');
                 const charDescPrompt =
-`[OOC: Based on this scene excerpt, describe each listed character. Reply with ONLY the formatted lines below — no story text, no dialogue, nothing else.
+`[OOC: Based on this scene excerpt, describe each listed character as they appear at the BEGINNING of this scene. Reply with ONLY the formatted lines below — no story text, no dialogue, nothing else.
 Format per character (one line each):
 Name | description | outfit | state | position
+IMPORTANT: State and position must reflect what characters are doing in THIS scene, not any other scene.
 Example:
-Brian Lockhart | Middle-aged man, brown hair, weathered face | Brown vest, work pants, boots | Concerned, protective | Standing in the kitchen doorway]
+Nathan | 35 year old man, lean build, brown hair | Gray t-shirt, faded blue jeans, work boots | Nervous, restless energy | Unpacking gear in inn room]
 
 Characters to describe: ${charNames}
 
@@ -1193,7 +1201,7 @@ Characters to describe: ${charNames}
                     injectPrompt(true);
                     ttDebug(`  regen #${mesId}: charDesc raw="${charResp.slice(0, 300).replace(/\n/g, '\\n')}"`);
 
-                    const looksLikeRoleplay = charResp.startsWith('(') || charResp.startsWith('*') || charResp.startsWith('"') || charResp.length > 600;
+                    const looksLikeRoleplay = charResp.startsWith('(') || charResp.startsWith('*') || charResp.startsWith('"') || charResp.length > 1200;
                     if (!looksLikeRoleplay) {
                         const respLines = charResp.trim().split('\n').map(l => l.trim()).filter(l => l.length > 0);
                         for (const line of respLines) {
