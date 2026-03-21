@@ -199,58 +199,114 @@ function extractHeartFromText(text) {
 }
 
 /**
- * Generate a heart value for an AI message via a focused AI call.
- * Uses delta-based prompting — asks the AI how much the heart CHANGES,
- * not what it should be. This prevents the AI from defaulting to 0.
+ * Keyword-based heuristic for estimating heart change from message content.
+ * Returns a signed integer delta. Always returns at least ±baseMin in magnitude
+ * (positive for neutral/positive content, negative for negative content).
+ *
+ * @param {string} text   - The message text to analyze.
+ * @param {number} baseMin - The minimum magnitude of change (sensitivity * 500).
+ * @returns {number} Signed delta to add to the previous heart value.
+ */
+function estimateHeartDelta(text, baseMin) {
+    const t = (text || '').toLowerCase();
+    const r = (min, max) => {
+        const lo = Math.round(Math.min(min, max));
+        const hi = Math.round(Math.max(min, max));
+        return lo + Math.floor(Math.random() * (hi - lo + 1));
+    };
+
+    // ── Major negative: betrayal, violence, deep hostility ──
+    if (/\b(betray(?:ed|al|s|ing)?|stab(?:bed|s)?\s+(?:in\s+the\s+back|him|her|them|me)|kill(?:ed|s|ing)?\s+(?:you|him|her|them|me)|abandon(?:ed|s|ing)?|hate[sd]?\s+you|despise[sd]?|loathe[sd]?|detest(?:ed|s|ing)?|sworn\s+enem|mortal\s+enem|bitter\s+rival)\b/.test(t)) {
+        return -r(baseMin * 2.5, baseMin * 4);
+    }
+
+    // ── Moderate negative: arguments, insults, rejection ──
+    if (/\b(argu(?:ed|es|ing|ment)|insult(?:ed|s|ing)?|reject(?:ed|s|ion|ing)?|furious(?:ly)?|slap(?:ped|s)?|push(?:ed|es)?\s+(?:away|back)|scold(?:ed|s|ing)?|yell(?:ed|s|ing)?|scream(?:ed|s|ing)?\s+at|disgust(?:ed)?|disappoint(?:ed|ment|ing)?|glare[sd]?\s+at|storm(?:ed|s|ing)?\s+(?:out|off|away)|shov(?:ed|es|ing)|sneer(?:ed|s|ing)?|mock(?:ed|s|ing)?|ridicul(?:ed?|es|ing)?)\b/.test(t)) {
+        return -r(baseMin, baseMin * 2);
+    }
+
+    // ── Mild negative: coldness, avoidance, tension ──
+    if (/\b(awkward(?:ly)?|cold(?:ly)?\s+(?:shoulder|stare|tone|gaze)|distant|ignore[sd]?|ignoring|avoid(?:ed|s|ing)?|frown(?:ed|s|ing)?|turn(?:ed|s)?\s+away|look(?:ed|s)?\s+away|uncomfortabl[ey]|tense(?:ly)?|withdrawn|reluctant(?:ly)?|wince[sd]?|flinch(?:ed|es|ing)?|pull(?:ed|s)?\s+(?:away|back)|step(?:ped|s)?\s+(?:back|away))\b/.test(t)) {
+        return -r(baseMin * 0.5, baseMin);
+    }
+
+    // ── Major positive: confession, kiss, love, sacrifice ──
+    if (/\b(confess(?:ed|es|ion|ing)?|kiss(?:ed|es|ing)?|lov(?:e[sd]?|ing)\s+you|i\s+love\s+you|marry|propos(?:ed|al|ing)|sacrific(?:ed?|ing)|sav(?:ed|es|ing)\s+(?:your|his|her|their|my)\s+life|embrac(?:ed?|es|ing)|caress(?:ed?|es|ing)|passionate(?:ly)?|heart\s+(?:pound|rac|flutter|skip|swell|ach)|deep(?:ly)?\s+(?:in\s+love|care|feelings?|affection)|devot(?:ed|ion)|cherish(?:ed|es|ing)?|soulmate|beloved)\b/.test(t)) {
+        return r(baseMin * 2.5, baseMin * 4);
+    }
+
+    // ── Moderate positive: compliments, kindness, help, affection ──
+    if (/\b(compliment(?:ed|s|ing)?|kind(?:ness|ly)?|thank(?:ed|s|ful|ing)?|help(?:ed|s|ing)?|gift(?:ed|s)?|protect(?:ed|s|ing)?|comfort(?:ed|s|ing)?|reassur(?:ed|es|ing)?|encourag(?:ed|es|ing|ement)?|prais(?:ed|es|ing)?|hug(?:ged|s|ging)?|held?\s+hands?|hand\s+on\s+(?:shoulder|cheek|hand|arm)|lean(?:ed|s|ing)?\s+(?:against|on|into|closer)|warm(?:ly|th)?|gentle|gently|soft(?:ly)?\s+(?:smil|touch|voice|whisper|spoke|said)|sweet(?:ly)?|car(?:ed?|ing)\s+(?:for|about)|worry(?:ing|ied)?\s+about|miss(?:ed)?\s+(?:you|him|her)|blush(?:ed|es|ing)?|flutter(?:ed|s|ing)?)\b/.test(t)) {
+        return r(baseMin * 1.5, baseMin * 2.5);
+    }
+
+    // ── Mild positive: smiles, laughter, friendly interaction ──
+    if (/\b(smil(?:ed?|es|ing)|laugh(?:ed|s|ing)?|chuckl(?:ed?|es|ing)|giggl(?:ed?|es|ing)|grin(?:ned|s|ning)?|nod(?:ded|s|ding)?|wink(?:ed|s|ing)?|wave[sd]?\s+(?:at|to)|playful(?:ly)?|teas(?:ed?|es|ing)|jok(?:ed?|es|ing)|chat(?:ted|s|ting)?|friendly|interest(?:ed|ing)?|curious(?:ly)?|listen(?:ed|s|ing)?\s+(?:careful|intent|close|eager)|bright(?:en|ly)|cheerful(?:ly)?|enjoy(?:ed|s|ing)?|fun\b|happy|happily|excite[ds]?|excited(?:ly)?)\b/.test(t)) {
+        return r(baseMin, baseMin * 1.5);
+    }
+
+    // ── Default: neutral/casual — still gets at least baseMin positive ──
+    return r(baseMin, Math.round(baseMin * 1.2));
+}
+
+/**
+ * Generate a heart value for an AI message.
+ * Hybrid approach: tries an AI quiet prompt first, and if the AI returns
+ * roleplay text instead of a valid integer, falls back to keyword heuristic.
  * Callers must handle clearing/restoring the extension prompt if needed.
  */
 async function generateHeartValue(msgText, prevHeart, maxShift) {
     const prev  = parseInt(prevHeart, 10) || 0;
-    const shift = Math.max(1, parseInt(maxShift, 10) || 2500);
+    const baseMin = Math.max(1, parseInt(maxShift, 10) || 2500);
 
-    // Try extracting from inline text first (e.g. "Black Heart (500) 🖤")
+    // 1. Try extracting from inline text first (e.g. "Black Heart (500) 🖤")
     const inline = extractHeartFromText(msgText);
     if (inline !== null) {
         ttDebug(`generateHeartValue: inline extraction → ${inline}`);
-        return clampHeart(inline, prev, shift);
+        return Math.max(0, Math.min(99999, inline));
     }
 
-    // Scale examples to the sensitivity setting so the AI understands the range
-    const small  = Math.round(shift * 0.1);   // ~10% of max shift
-    const medium = Math.round(shift * 0.3);   // ~30% of max shift
-    const large  = Math.round(shift * 0.7);   // ~70% of max shift
+    // 2. Try AI call — ask for a signed integer delta
+    const small  = Math.round(baseMin * 0.5);
+    const medium = baseMin;
+    const large  = Math.round(baseMin * 2);
 
     const prompt =
 `[OOC: Based on the following story excerpt, how does the character's romantic interest toward {{user}} change?
 Current heart value: ${prev} (scale: 0–99,999).
 Reply with ONLY a signed integer for the change amount.
 Positive = warmer/friendlier feelings. Negative = colder/hostile feelings.
-Casual/neutral conversation: +${small} to +${medium}.
+Casual/neutral conversation: +${medium}.
 Meaningful positive interaction (compliments, help, kindness): +${medium} to +${large}.
-Major emotional event (confession, kiss, sacrifice): +${large} to +${shift}.
+Major emotional event (confession, kiss, sacrifice): +${large} to +${Math.round(baseMin * 3)}.
 Negative interaction (argument, insult, rejection): -${small} to -${large}.
+Major negative event (betrayal, violence): -${large} to -${Math.round(baseMin * 3)}.
 Reply with ONLY a signed integer like +${medium} or -${small}. No other text.]
 
 "${(msgText || '').slice(0, 600)}"`;
 
     try {
         const response = await generateQuietPrompt(prompt, false, true);
-        ttDebug(`generateHeartValue: raw="${response.slice(0, 80)}"`);
+        ttDebug(`generateHeartValue: AI raw="${response.slice(0, 120)}"`);
         const match = response.trim().match(/([+-]?\d{1,5})/);
         if (match) {
             const delta = parseInt(match[1], 10);
             if (!isNaN(delta) && delta !== 0) {
-                const newVal = prev + delta;
-                return Math.max(0, Math.min(99999, Math.max(prev - shift, Math.min(prev + shift, newVal))));
+                const newVal = Math.max(0, Math.min(99999, prev + delta));
+                ttDebug(`generateHeartValue: AI delta=${delta > 0 ? '+' : ''}${delta} → ${newVal}`);
+                return newVal;
             }
         }
+        ttDebug(`generateHeartValue: AI returned no valid integer, falling back to heuristic`);
     } catch (e) {
-        ttDebug(`generateHeartValue: ERROR ${e.message}`);
+        ttDebug(`generateHeartValue: AI ERROR ${e.message}, falling back to heuristic`);
     }
 
-    // Fallback: keep previous value (don't add arbitrary amounts)
-    ttDebug(`generateHeartValue: AI failed/returned 0, keeping prev=${prev}`);
-    return prev;
+    // 3. Heuristic fallback — keyword-based sentiment analysis
+    const delta = estimateHeartDelta(msgText, baseMin);
+    const newVal = Math.max(0, Math.min(99999, prev + delta));
+    ttDebug(`generateHeartValue: heuristic delta=${delta > 0 ? '+' : ''}${delta} → ${newVal} (baseMin=${baseMin})`);
+    return newVal;
 }
 
 // ── Tag parsing ───────────────────────────────────────────────
