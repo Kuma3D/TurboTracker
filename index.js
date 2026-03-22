@@ -270,25 +270,26 @@ function estimateMinutesFromContent(text, prevTimeStr) {
     // If the text explicitly says "evening air", "morning sun", etc.
     // and we know the previous time, compute the minutes needed to reach
     // the appropriate hour. Handles both same-day and overnight jumps.
+    // IMPORTANT: Only jump if prevTime is significantly BEFORE the target
+    // range (>2 hours away). If already near the target (e.g. 6:50 AM and
+    // text says "good morning"), it's just a greeting, not a time jump.
     if (prevHour24 !== null) {
         // "evening" / "dusk" / "sunset" → ~17:00-18:00
         if (/\b(?:the\s+)?evening\b(?:\s+(?:air|sky|sun|light|breeze|chill|glow|hours?))?/.test(t) ||
             /\b(?:dusk|sunset|sundown)\b/.test(t)) {
             const target = r(17, 18); // 5-6 PM
-            if (prevHour24 < target) {
+            if (prevHour24 < target && (target - prevHour24) > 2) {
                 return (target - prevHour24) * 60 + r(0, 30);
             } else if (prevHour24 >= 22) {
-                // Overnight: late night → next evening (rare but handle it)
                 return (24 - prevHour24 + target) * 60 + r(0, 30);
             }
         }
         // "afternoon" → ~13:00-15:00
         if (/\b(?:the\s+)?afternoon\b(?:\s+(?:sun|light|heat|breeze|hours?))?/.test(t)) {
             const target = r(13, 15);
-            if (prevHour24 < target) {
+            if (prevHour24 < target && (target - prevHour24) > 2) {
                 return (target - prevHour24) * 60 + r(0, 30);
             } else if (prevHour24 >= 20) {
-                // Overnight: night → next afternoon
                 return (24 - prevHour24 + target) * 60 + r(0, 30);
             }
         }
@@ -296,17 +297,16 @@ function estimateMinutesFromContent(text, prevTimeStr) {
         if (/\b(?:the\s+)?(?:morning|dawn|sunrise)\b/.test(t) ||
             /\b(?:awaken(?:ed|s|ing)?|wak(?:e[sd]?|ing)\s+up|woke\s+up)\b/.test(t)) {
             const target = r(7, 9);
-            if (prevHour24 < target) {
+            if (prevHour24 < target && (target - prevHour24) > 2) {
                 return (target - prevHour24) * 60 + r(0, 30);
             } else if (prevHour24 >= 17) {
-                // Overnight: evening/night → next morning
                 return (24 - prevHour24 + target) * 60 + r(0, 30);
             }
         }
         // "night" / "midnight" / "late at night" → ~21:00-23:00
         if (/\b(?:the\s+)?(?:night(?:\s+(?:air|sky|breeze))?|midnight|late\s+at\s+night)\b/.test(t)) {
             const target = r(21, 23);
-            if (prevHour24 < target) {
+            if (prevHour24 < target && (target - prevHour24) > 2) {
                 return (target - prevHour24) * 60 + r(0, 30);
             }
         }
@@ -1267,17 +1267,19 @@ ${charsTemplate}
                     // Description and outfit are stable across scenes — prefer roster data
                     description: dc.description || detail?.description || '',
                     outfit:      dc.outfit      || detail?.outfit      || '',
-                    // State and position are scene-specific — prefer AI response over roster
-                    state:       detail?.state    || '',
-                    position:    detail?.position || '',
+                    // State and position are ALWAYS blank here — the main AI prompt
+                    // frequently generates them from prior context (wrong scene).
+                    // The focused character description prompt below will fill them
+                    // using ONLY the current message text.
+                    state:       '',
+                    position:    '',
                 };
             });
             ttDebug(`  regen #${mesId}: characters from text detection: ${data.characters.map(c => `${c.name}(desc=${c.description ? 'yes' : 'no'})`).join(',')}`);
 
-            // ── Fill blank character fields via focused AI prompt ──
-            // State and position are always blank from the roster (scene-specific),
-            // and some characters may also lack description/outfit.
-            // Ask the AI to fill in missing fields for all characters that need it.
+            // ── Fill character state/position (and any blank descriptions) via focused AI prompt ──
+            // State and position are always blank at this point (scene-specific, can't carry over).
+            // The focused prompt reads ONLY the current message text, ensuring correct scene data.
             const needsFill = data.characters.filter(c => !c.description || !c.outfit || !c.state || !c.position);
             if (needsFill.length > 0 && msg.mes) {
                 const charNames = needsFill.map(c => c.name).join(', ');
