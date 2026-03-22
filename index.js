@@ -1199,21 +1199,21 @@ async function regenTracker(mesId) {
         // Context is provided both inline (for emphasis) and via the limited
         // generateQuietPrompt conversation window (for natural chat flow).
         const genPrompt =
-`[OOC: Based on the conversation context, determine the tracker state for the MOST RECENT message. Output ONLY the tracker block — no story text, no dialogue, nothing else.
+`[OOC: Based on the conversation context, determine the tracker state for the OPENING MOMENT of the most recent message. Think of this as a freeze-frame snapshot taken at the very first line — before any events in that message unfold. Output ONLY the tracker block — no story text, no dialogue, nothing else.
 
 IMPORTANT:
-- Time: Determine from context clues — times mentioned in dialogue, scheduled events, time-of-day descriptions. Format as h:MM AM/PM; MM/DD/YYYY (DayOfWeek).
-- Location: Where the scene takes place at the START of the most recent message.
-- Characters: Include ALL characters present in or implied by the scene, including {{user}} if they are present. Each character needs description, outfit, current state, and position.
+- Time: What time is it at the VERY FIRST LINE of the most recent message? Advance only a few minutes (2–5) from the previous tracker time unless the message OPENS with an explicit time-skip phrase like "an hour later" or "the next morning". Do NOT advance time to reflect where events lead by the end of the message.
+- Location: Where are the characters standing/sitting at the VERY FIRST LINE? Ignore where they travel to later in the message.
+- Characters: Include ALL characters present in the opening moment, including {{user}} if present. State and position must reflect the opening moment, not the end of the message.
 - ${heartInstr}]
 
-Previous tracker state (for reference — update based on scene changes):
+Previous tracker state (for reference — advance only slightly unless the opening explicitly states otherwise):
 ${prevTrackerText}
 ${rosterRef}
 
 [TRACKER]
 time: ${msg.is_user && regenPrevTime ? regenPrevTime : 'h:MM AM/PM; MM/DD/YYYY (DayOfWeek)'}
-location: Where the scene takes place at the START of this message
+location: Where characters are at the very first line of this message
 weather: Weather description, Temperature
 heart: ${msg.is_user ? prevHeart : `integer between ${heartLo} and ${heartHi}`}
 characters:
@@ -1270,17 +1270,18 @@ characters:
         }
 
         // ── Focused location/weather prompt (safety check) ──
-        // Reads ONLY the current message text to verify/correct location.
+        // Only quotes the opening ~250 chars so the AI answers based on where
+        // the scene STARTS, not where events lead by the end of the message.
         if (msg.mes) {
             const locPrompt =
-`[OOC: Based on ONLY this scene excerpt, answer two questions.
-Line 1: Where does this scene take place at the BEGINNING? Give the specific location where the action starts (e.g. a room, building, or area — not where they travel to later).
+`[OOC: Based on ONLY the opening of this scene excerpt (first sentence or two), answer two questions.
+Line 1: Where are the characters at the very start? Give the specific location (e.g. a room, building, or area — not where they travel to later).
 Line 2: What is the weather/temperature? Include a temperature in °F.
 Reply with ONLY two lines, no other text. Example:
 Inn room, second floor of the Nibelheim inn
 Cool evening, thin mountain air, 55°F]
 
-"${(msg.mes || '').slice(0, 800)}"`;
+"${(msg.mes || '').slice(0, 250)}"`;
 
             try {
                 const locResp = await generateWithLimitedContext(ctx, mesId, locPrompt, CONTEXT_WINDOW);
