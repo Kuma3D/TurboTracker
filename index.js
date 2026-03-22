@@ -179,13 +179,15 @@ function estimateMinutesFromContent(text, prevTimeStr) {
     const t = (text || '').toLowerCase();
     const r = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
 
-    // ── Parse the previous time into 24h hours for time-of-day jumps ──
+    // ── Parse the previous time into 24h hours + minutes ──
     let prevHour24 = null;
+    let prevMinute = 0;
     if (prevTimeStr) {
         // Format 1: H:MM AM/PM (12-hour)
         const tm = prevTimeStr.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)/i);
         if (tm) {
             let h = parseInt(tm[1], 10);
+            prevMinute = parseInt(tm[2], 10);
             const p = tm[3].toUpperCase();
             if (p === 'PM' && h !== 12) h += 12;
             if (p === 'AM' && h === 12) h = 0;
@@ -195,6 +197,71 @@ function estimateMinutesFromContent(text, prevTimeStr) {
             const tm2 = prevTimeStr.match(/^(\d{1,2}):(\d{2})(?::\d{2})?/);
             if (tm2) {
                 prevHour24 = parseInt(tm2[1], 10);
+                prevMinute = parseInt(tm2[2], 10);
+            }
+        }
+    }
+
+    // ── Explicit time mentions — highest priority ──
+    // If the text contains a specific time ("6:50", "seven o'clock", "at 7 AM"),
+    // compute the exact minutes from prevTime to that stated time.
+    if (prevHour24 !== null) {
+        let explicitHour = null;
+        let explicitMin = 0;
+
+        // Digital times with context: "it's 6:50", "at 7:00", "watch...6:50"
+        const digitalCtx = t.match(/(?:it(?:'s| is| was)\s+|at\s+(?:exactly\s+|precisely\s+|about\s+)?|around\s+|by\s+|watch[^.]{0,30}?)(\d{1,2}):(\d{2})(?:\s*(am|pm))?/i);
+        // Digital with AM/PM (no context needed): "6:50 AM", "7:00 PM"
+        const digitalAMPM = !digitalCtx ? t.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i) : null;
+        const dMatch = digitalCtx || digitalAMPM;
+
+        if (dMatch) {
+            explicitHour = parseInt(dMatch[1], 10);
+            explicitMin = parseInt(dMatch[2], 10);
+            if (dMatch[3]) {
+                const p = dMatch[3].toLowerCase();
+                if (p === 'pm' && explicitHour !== 12) explicitHour += 12;
+                if (p === 'am' && explicitHour === 12) explicitHour = 0;
+            }
+            // No AM/PM — for hours 1-12, context determines AM/PM
+            // If prev is evening/night and explicit hour is small → next day AM
+        }
+
+        // Written times: "at seven o'clock", "at exactly seven", "at seven thirty"
+        if (explicitHour === null) {
+            const wordNums = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
+                seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+                noon: 12, midnight: 0 };
+            const wordPat = Object.keys(wordNums).join('|');
+            const wordRe = new RegExp(
+                `(?:at\\s+(?:exactly\\s+|precisely\\s+|about\\s+|around\\s+)?)(${wordPat})(?:\\s+(o'?clock|thirty|fifteen|forty[- ]?five))?(?:\\s+(am|pm))?`,
+                'i'
+            );
+            const wMatch = t.match(wordRe);
+            if (wMatch) {
+                explicitHour = wordNums[wMatch[1].toLowerCase()];
+                if (wMatch[2]) {
+                    const sfx = wMatch[2].toLowerCase().replace(/[-\s]/g, '');
+                    if (sfx === 'thirty') explicitMin = 30;
+                    else if (sfx === 'fifteen') explicitMin = 15;
+                    else if (sfx === 'fortyfive') explicitMin = 45;
+                }
+                if (wMatch[3]) {
+                    const p = wMatch[3].toLowerCase();
+                    if (p === 'pm' && explicitHour !== 12) explicitHour += 12;
+                    if (p === 'am' && explicitHour === 12) explicitHour = 0;
+                }
+            }
+        }
+
+        if (explicitHour !== null && explicitHour >= 0 && explicitHour < 24) {
+            const prevTotal = prevHour24 * 60 + prevMinute;
+            const targetTotal = explicitHour * 60 + explicitMin;
+            let diff = targetTotal - prevTotal;
+            if (diff <= -120) diff += 24 * 60; // Overnight wrap
+            if (diff > 0) {
+                ttDebug(`estimateMinutes: explicit time ${explicitHour}:${String(explicitMin).padStart(2, '0')} from prev ${prevHour24}:${String(prevMinute).padStart(2, '0')} → ${diff}min`);
+                return diff;
             }
         }
     }
