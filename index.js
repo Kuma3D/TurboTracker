@@ -1225,6 +1225,7 @@ ${charsTemplate}
         ttDebug(`  regen #${mesId}: raw response="${(response || '').slice(0, 200).replace(/\n/g, '\\n')}"`);
 
         let data = parseTrackerBlock(response);
+        const aiReturnedTracker = !!data;
         ttDebug(`  regen #${mesId}: parsed=${data ? `time="${data.time}" heart=${data.heart} chars=${(data.characters||[]).map(c=>c.name).join(',')}` : 'null (no [TRACKER] block)'}`);
 
         // Fallback: if the AI returned roleplay instead of a tracker block,
@@ -1386,9 +1387,12 @@ Cool evening, mountain breeze]
             }
         }
 
-        // ── Always enforce time ourselves — never trust the AI's time ──
-        // The AI regularly returns wildly wrong times (hours off, wrong period).
-        // Compute from previous tracker time + heuristic minute advance.
+        // ── Time handling ──
+        // For user messages: always compute ourselves (explicit time extraction + heuristic).
+        // For AI messages: trust the AI's time when it returned a valid tracker block,
+        // since only the AI can understand narrative context like "meeting at 7 AM"
+        // mentioned several posts earlier. Fall back to heuristic only when the AI
+        // failed (returned roleplay / no tracker block) and we're using stale fallback data.
         if (msg.is_user) {
             data.heart = prevHeart;
             if (regenPrevTime) {
@@ -1396,9 +1400,15 @@ Cool evening, mountain breeze]
             }
         } else {
             if (regenPrevTime) {
-                const nudge = estimateMinutesFromContent(msg.mes || '', regenPrevTime);
-                data.time = advanceTimeString(regenPrevTime, nudge);
-                ttDebug(`  regen #${mesId}: enforced time: prev="${regenPrevTime}" +${nudge}min → "${data.time}"`);
+                if (aiReturnedTracker && data.time && data.time !== 'h:MM AM/PM; MM/DD/YYYY (DayOfWeek)') {
+                    // AI returned a tracker with a time — trust it (context-aware)
+                    ttDebug(`  regen #${mesId}: keeping AI time="${data.time}" (AI returned tracker block)`);
+                } else {
+                    // AI failed — use explicit time extraction + heuristic fallback
+                    const nudge = estimateMinutesFromContent(msg.mes || '', regenPrevTime);
+                    data.time = advanceTimeString(regenPrevTime, nudge);
+                    ttDebug(`  regen #${mesId}: heuristic time: prev="${regenPrevTime}" +${nudge}min → "${data.time}"`);
+                }
             }
 
             // Heart: if the AI provided a valid heart in the tracker block, clamp it.
