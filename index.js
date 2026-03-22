@@ -1202,12 +1202,12 @@ async function regenTracker(mesId) {
 `[OOC: Based on the conversation context, determine the tracker state for the OPENING MOMENT of the most recent message. Think of this as a freeze-frame snapshot taken at the very first line — before any events in that message unfold. Output ONLY the tracker block — no story text, no dialogue, nothing else.
 
 IMPORTANT:
-- Time: What time is it at the VERY FIRST LINE of the most recent message? Advance only a few minutes (2–5) from the previous tracker time unless the message OPENS with an explicit time-skip phrase like "an hour later" or "the next morning". Do NOT advance time to reflect where events lead by the end of the message.
+- Time: What time is it at the VERY FIRST LINE of the most recent message? Determine this from the full conversation context — including what happened in previous messages. If previous messages described travel, a long activity, or a significant time skip, the opening of the current message should reflect that elapsed time. Do NOT advance time to reflect where events lead by the END of the current message — only the opening moment matters.
 - Location: Where are the characters standing/sitting at the VERY FIRST LINE? Ignore where they travel to later in the message.
 - Characters: Include ALL characters present in the opening moment, including {{user}} if present. State and position must reflect the opening moment, not the end of the message.
 - ${heartInstr}]
 
-Previous tracker state (for reference — advance only slightly unless the opening explicitly states otherwise):
+Previous tracker state (for reference — use context to determine how much time has passed since this):
 ${prevTrackerText}
 ${rosterRef}
 
