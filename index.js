@@ -1226,8 +1226,23 @@ characters:
         // Only current message + 5 previous messages are visible to the AI.
         // This prevents future messages from leaking in and causing the AI
         // to respond about the wrong scene.
+        //
+        // Additionally, temporarily truncate the current message to its first
+        // ~300 chars so the AI can only see the OPENING of the post. Without
+        // this it reads the entire message and generates state for where events
+        // lead by the end, not where the scene starts. Characters not mentioned
+        // in the opening are inferred from the previous messages/tracker (which
+        // are visible in the context window and show who is in the group).
         const CONTEXT_WINDOW = 6;
-        const response = await generateWithLimitedContext(ctx, mesId, genPrompt, CONTEXT_WINDOW);
+        const OPEN_CHARS = 300;
+        const originalMes = msg.mes;
+        msg.mes = (msg.mes || '').slice(0, OPEN_CHARS);
+        let response;
+        try {
+            response = await generateWithLimitedContext(ctx, mesId, genPrompt, CONTEXT_WINDOW);
+        } finally {
+            msg.mes = originalMes;
+        }
 
         ttDebug(`  regen #${mesId}: raw response="${(response || '').slice(0, 200).replace(/\n/g, '\\n')}"`);
 
@@ -1270,8 +1285,8 @@ characters:
         }
 
         // ── Focused location/weather prompt (safety check) ──
-        // Only quotes the opening ~250 chars so the AI answers based on where
-        // the scene STARTS, not where events lead by the end of the message.
+        // msg.mes is restored here (after the main call), so we re-truncate
+        // it for the same reason — only show the opening to the AI.
         if (msg.mes) {
             const locPrompt =
 `[OOC: Based on ONLY the opening of this scene excerpt (first sentence or two), answer two questions.
@@ -1281,10 +1296,12 @@ Reply with ONLY two lines, no other text. Example:
 Inn room, second floor of the Nibelheim inn
 Cool evening, thin mountain air, 55°F]
 
-"${(msg.mes || '').slice(0, 250)}"`;
+"${(msg.mes || '').slice(0, OPEN_CHARS)}"`;
 
             try {
+                msg.mes = (msg.mes || '').slice(0, OPEN_CHARS);
                 const locResp = await generateWithLimitedContext(ctx, mesId, locPrompt, CONTEXT_WINDOW);
+                msg.mes = originalMes;
                 ttDebug(`  regen #${mesId}: locPrompt raw="${locResp.slice(0, 200).replace(/\n/g, '\\n')}"`);
 
                 const lines = locResp.trim().split('\n').map(l => l.trim()).filter(l => l.length > 0);
@@ -1307,6 +1324,7 @@ Cool evening, thin mountain air, 55°F]
                     ttDebug(`  regen #${mesId}: locPrompt returned roleplay, keeping existing location`);
                 }
             } catch (e) {
+                msg.mes = originalMes;
                 ttDebug(`  regen #${mesId}: locPrompt ERROR ${e.message}`);
             }
         }
