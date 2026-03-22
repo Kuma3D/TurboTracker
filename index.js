@@ -1217,7 +1217,7 @@ location: Where the scene takes place at the START of this message
 weather: Weather description, Temperature
 heart: ${msg.is_user ? prevHeart : `integer between ${heartLo} and ${heartHi}`}
 characters:
-- name: CharacterName | description: Physical description | outfit: Clothing description | state: Emotional/physical state | position: Where in the scene
+- name: CharacterName | description: Hair color, eye color, height, build, notable features | outfit: Full clothing description | state: Specific emotional/physical state | position: Precise placement and posture within the scene
 [/TRACKER]`;
 
         ttDebug(`  regen #${mesId}: prevHeart=${prevHeart} range=[${heartLo},${heartHi}] prevTime="${regenPrevTime || 'none'}" roster=${roster.size} chars`);
@@ -1275,10 +1275,10 @@ characters:
             const locPrompt =
 `[OOC: Based on ONLY this scene excerpt, answer two questions.
 Line 1: Where does this scene take place at the BEGINNING? Give the specific location where the action starts (e.g. a room, building, or area — not where they travel to later).
-Line 2: What is the weather/temperature?
+Line 2: What is the weather/temperature? Include a temperature in °F.
 Reply with ONLY two lines, no other text. Example:
-Inn room, Nibelheim village
-Cool evening, mountain breeze]
+Inn room, second floor of the Nibelheim inn
+Cool evening, thin mountain air, 55°F]
 
 "${(msg.mes || '').slice(0, 800)}"`;
 
@@ -1446,10 +1446,10 @@ At the very end of EVERY response, after all narrative text, append a tracker bl
 [TRACKER]
 time: h:MM AM/PM; story-appropriate date (DayOfWeek)
 location: Full location description
-weather: Weather condition, Temperature
+weather: Weather condition, temperature in °F (e.g. Warm morning sun, light mountain breeze, 65°F)
 heart: integer_value
 characters:
-- name: CharacterName | description: Hair color, eye color, height, weight, notable features | outfit: Clothing description | state: Emotional/physical state | position: Where in the scene
+- name: CharacterName | description: Hair color, eye color, height, build, notable features | outfit: Full clothing description | state: Emotional/physical state | position: Precise location and posture within the scene (e.g. "Seated at the bar, elbows on the counter, facing the door")
 [/TRACKER]
 ${userMsgSection}
 PREVIOUS TRACKER STATE — your baseline. Update each field that the current exchange (user message + your response) requires; copy everything else forward exactly:
@@ -1484,8 +1484,9 @@ Heart Meter:
 Characters section:
   List every character currently present in the scene.
   Each line must use the pipe-separated format shown above.
-  description: brief physical description — hair color, eye color, height, weight, notable features. Pull from character/user card if available; infer or estimate if not.
-  Include current outfit, emotional/physical state, and position in the scene.`;
+  description: physical description — hair color, eye color, height, build, notable features. Pull from character/user card if available; infer or estimate if not.
+  state: specific emotional and/or physical condition (e.g. "Nervous, fidgeting with her braid" or "Relaxed, slightly flushed from the heat").
+  position: precise placement and posture in the scene (e.g. "Leaning against the bar with arms crossed, facing the entrance" or "Seated across the table, hands wrapped around a mug, leaning slightly forward").`;
 
     setExtensionPrompt(EXT_NAME, prompt, extension_prompt_types.BEFORE_PROMPT, 0);
 }
@@ -1878,7 +1879,7 @@ ${msg.mes.slice(0, 600)}`;
                 ? prevTrackerObj.characters
                     .map(c => `- name: ${c.name} | description: ${c.description || '???'} | outfit: ${c.outfit || '???'} | state: ??? | position: ???`)
                     .join('\n')
-                : `- name: CharacterName | description: Physical description | outfit: Clothing | state: Emotional state | position: Position`;
+                : `- name: CharacterName | description: Hair color, eye color, height, build | outfit: Full clothing description | state: Specific emotional/physical state | position: Precise placement and posture within the scene`;
 
             const genPrompt =
 `[OOC: Complete this scene tracker. Fill each field based on the current story moment. The time is already set — do NOT change it. ${heartInstruction} Output ONLY the [TRACKER]...[/TRACKER] block — no story text, no dialogue, nothing else.]
