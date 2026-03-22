@@ -1314,18 +1314,17 @@ Cool evening, thin mountain air, 55°F]
         if (msg.is_user) {
             data.heart = prevHeart;
         } else {
-            if (data.heart !== null && data.heart !== undefined && !isNaN(parseInt(data.heart, 10))) {
-                data.heart = heartKnown
-                    ? clampHeart(data.heart, prevHeart, maxShift)
-                    : Math.max(0, Math.min(99999, parseInt(data.heart, 10) || 0));
-            } else {
-                ttDebug(`  regen #${mesId}: generating heart via generateHeartValue (prev=${prevHeart})`);
-                setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
-                try {
-                    data.heart = await generateHeartValue(msg.mes, prevHeart, maxShift);
-                } finally {
-                    injectPrompt(true);
-                }
+            // Always use generateHeartValue for AI messages — it has calibrated
+            // multiplier guidance so the AI picks sensible values for the current
+            // sensitivity level. The tracker block heart is ignored here because
+            // the main prompt only says "integer between X and Y" and the AI
+            // tends to anchor conservatively (100–200) regardless of sensitivity.
+            ttDebug(`  regen #${mesId}: generating heart via generateHeartValue (prev=${prevHeart})`);
+            setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
+            try {
+                data.heart = await generateHeartValue(msg.mes, prevHeart, maxShift);
+            } finally {
+                injectPrompt(true);
             }
             s.heartPoints = parseInt(data.heart, 10) || 0;
         }
@@ -1479,6 +1478,13 @@ Heart Meter:
   Only the character's own emotions drive this — never adjust based on user actions alone.
   Current value: ${s.heartPoints}
   THIS RESPONSE: the heart value MUST be between ${Math.max(0, s.heartPoints - maxShift)} and ${Math.min(99999, s.heartPoints + maxShift)}. Any value outside this range is an error.
+  Expected change amounts for this sensitivity level:
+    Neutral/casual exchange:              +${Math.round(maxShift * 0.2 / 100) * 100} – +${Math.round(maxShift * 0.4 / 100) * 100}
+    Friendly/kind interaction:            +${Math.round(maxShift * 0.3 / 100) * 100} – +${Math.round(maxShift * 0.5 / 100) * 100}
+    Meaningful positive moment:           +${Math.round(maxShift * 0.5 / 100) * 100} – +${Math.round(maxShift * 0.8 / 100) * 100}
+    Major emotional event (kiss/confession): +${Math.round(maxShift * 0.8 / 100) * 100} – +${Math.round(maxShift * 1.0 / 100) * 100}
+    Negative interaction:                 -${Math.round(maxShift * 0.2 / 100) * 100} – -${Math.round(maxShift * 0.7 / 100) * 100}
+  Do NOT return tiny values like 100–200 unless sensitivity is at its minimum. Use the ranges above as your guide.
   ${colorDesc}
 
 Characters section:
