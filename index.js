@@ -448,6 +448,66 @@ function detectCharactersInMessage(chat, mesId) {
 }
 
 /**
+ * Build a roster of ALL known characters from every tracker in the chat.
+ * Returns a Map of name → { name, description, outfit } with the most
+ * complete data merged across all trackers.  State/position are omitted
+ * because they're scene-specific and shouldn't carry over.
+ */
+function buildCharacterRoster(chat) {
+    const roster = new Map();
+    const merge = (existing, incoming) => ({
+        name:        incoming.name,
+        description: incoming.description || existing.description || '',
+        outfit:      incoming.outfit      || existing.outfit      || '',
+    });
+    for (let i = 0; i < chat.length; i++) {
+        const tt = chat[i]?.extra?.tt_tracker;
+        if (tt?.characters) {
+            for (const c of tt.characters) {
+                if (!c.name) continue;
+                const prev = roster.get(c.name);
+                roster.set(c.name, prev ? merge(prev, c) : { name: c.name, description: c.description || '', outfit: c.outfit || '' });
+            }
+        }
+        const st = chat[i]?.tracker;
+        if (st && typeof st === 'object') {
+            const imported = convertSTTrackerToTT(st);
+            if (imported?.characters) {
+                for (const c of imported.characters) {
+                    if (!c.name) continue;
+                    const prev = roster.get(c.name);
+                    roster.set(c.name, prev ? merge(prev, c) : { name: c.name, description: c.description || '', outfit: c.outfit || '' });
+                }
+            }
+        }
+    }
+    return roster;
+}
+
+/**
+ * Call generateQuietPrompt with a limited context window.
+ * Temporarily splices ctx.chat so the AI only sees `windowSize` messages
+ * ending at mesId (i.e. current message + previous messages).
+ * No future messages leak into the context.
+ *
+ * The extension prompt is cleared before the call and restored after.
+ */
+async function generateWithLimitedContext(ctx, mesId, prompt, windowSize = 6) {
+    const savedAfter  = ctx.chat.splice(mesId + 1);
+    const trimStart   = Math.max(0, ctx.chat.length - windowSize);
+    const savedBefore = trimStart > 0 ? ctx.chat.splice(0, trimStart) : [];
+
+    setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
+    try {
+        return await generateQuietPrompt(prompt, false, true);
+    } finally {
+        if (savedBefore.length) ctx.chat.splice(0, 0, ...savedBefore);
+        ctx.chat.push(...savedAfter);
+        injectPrompt(true);
+    }
+}
+
+/**
  * Try to extract a location from the message text by scanning for
  * movement/arrival phrases and room/building indicators.
  * Returns a location string or null if nothing clear was found.
@@ -1122,118 +1182,65 @@ async function regenTracker(mesId) {
         const heartLo    = heartKnown ? Math.max(0,     prevHeart - maxShift) : 0;
         const heartHi    = heartKnown ? Math.min(99999, prevHeart + maxShift) : 99999;
 
-        // Check if the CURRENT message has STTracker data (used as seed for
-        // fields like time/location/weather but NOT characters — STTracker
-        // character data is often stale from the old extension).
-        const currentSTData = tryImportSTTracker(msg);
-        const prevTrackerObj = getMostRecentTracker(ctx.chat, mesId);
+        // Build roster of known characters for description/outfit reference.
+        // The AI will determine which characters are actually present in the scene.
+        const roster = buildCharacterRoster(ctx.chat);
+        const rosterRef = roster.size > 0
+            ? '\nKnown characters (use for description/outfit reference — only include those present in the scene):\n' +
+              Array.from(roster.values()).map(c => `- ${c.name}: ${c.description || '???'} | outfit: ${c.outfit || '???'}`).join('\n')
+            : '';
 
-        // Detect which characters are actually mentioned in this message's text.
-        // This avoids blindly cloning stale STTracker or previous-tracker characters.
-        const detectedChars = detectCharactersInMessage(ctx.chat, mesId);
-        const currentChars = detectedChars
-            || msg.extra?.tt_tracker?.characters
-            || currentSTData?.characters
-            || prevTrackerObj?.characters
-            || [];
-        const charsTemplate = currentChars.length
-            ? currentChars
-                .map(c => `- name: ${c.name} | description: ${c.description || '???'} | outfit: ${c.outfit || '???'} | state: ${c.state || '???'} | position: ${c.position || '???'}`)
-                .join('\n')
-            : '- name: CharacterName | description: Physical description | outfit: Clothing description | state: State | position: Position';
+        // Heart instruction varies by sender
+        const heartInstr = msg.is_user
+            ? `heart must remain exactly ${prevHeart} — only the character's emotions change this, never the user.`
+            : `heart must be between ${heartLo} and ${heartHi}${heartKnown ? ` (previous value was ${prevHeart})` : ' — heart has not been established yet, infer an appropriate value from the narrative'}.`;
 
-        ttDebug(`  regen #${mesId}: prevHeart=${prevHeart} range=[${heartLo},${heartHi}] prevTime="${regenPrevTime || 'none'}" chars=${currentChars.map(c=>c.name).join(',') || 'none'}`);
-        let genPrompt;
-        let regenNudge    = 0;
-        let regenUserTime = null;
+        // Build the generation prompt — unified for both user and AI messages.
+        // Context is provided both inline (for emphasis) and via the limited
+        // generateQuietPrompt conversation window (for natural chat flow).
+        const genPrompt =
+`[OOC: Based on the conversation context, determine the tracker state for the MOST RECENT message. Output ONLY the tracker block — no story text, no dialogue, nothing else.
 
-        if (msg.is_user) {
-            // User message: compute time ourselves using content heuristic.
-            // This detects time-of-day keywords ("evening air", "morning sun")
-            // and computes appropriate jumps instead of always adding 2-5 min.
-            regenNudge    = estimateMinutesFromContent(msg.mes || '', regenPrevTime);
-            regenUserTime = regenPrevTime
-                ? advanceTimeString(regenPrevTime, regenNudge)
-                : 'h:MM AM/PM; MM/DD/YYYY (DayOfWeek)';
-            ttDebug(`  regen #${mesId} user: prevTime="${regenPrevTime}" +${regenNudge}min → "${regenUserTime}"`);
+IMPORTANT:
+- Time: Determine from context clues — times mentioned in dialogue, scheduled events, time-of-day descriptions. Format as h:MM AM/PM; MM/DD/YYYY (DayOfWeek).
+- Location: Where the scene takes place at the START of the most recent message.
+- Characters: Include ALL characters present in or implied by the scene, including {{user}} if they are present. Each character needs description, outfit, current state, and position.
+- ${heartInstr}]
 
-            genPrompt =
-`[OOC: Based on the user's message below and the previous tracker state, produce an updated tracker reflecting any scene changes the user's message logically implies. Output ONLY the tracker block — no other text.
-
-IMPORTANT: Location must reflect where the scene takes place at the BEGINNING of this message — the setting where the action starts. Do NOT use locations from previous messages.
-The time is already set — do NOT change it.
-heart must remain exactly ${prevHeart} — only the character's emotions change this, never the user.]
-
-Previous tracker state (for reference — update location if the scene moved):
+Previous tracker state (for reference — update based on scene changes):
 ${prevTrackerText}
-
-User's message:
-${msg.mes}
+${rosterRef}
 
 [TRACKER]
-time: ${regenUserTime}
-location: Where the scene takes place at the BEGINNING of this message
-weather: Weather description, Temperature
-heart: ${prevHeart}
-characters:
-${charsTemplate}
-[/TRACKER]`;
-        } else {
-            // AI message: use only the current message + immediately preceding one.
-            // A larger context window (e.g. 6 messages) causes the AI to pick up
-            // locations, characters, and details from earlier scenes.
-            const start       = Math.max(0, mesId - 1);
-            const contextMsgs = ctx.chat.slice(start, mesId + 1);
-            const contextText = contextMsgs
-                .map(m => `${m.is_user ? '{{user}}' : '{{char}}'}: ${m.mes}`)
-                .join('\n\n');
-
-            genPrompt =
-`[OOC: Based on the message below, determine the tracker state. Focus on WHERE the characters are at the BEGINNING of this message — the setting where the scene starts. Output ONLY the tracker block — no other text.
-
-IMPORTANT: Location must reflect where the scene takes place at the START of THIS message. Do NOT use locations from previous messages or later in the conversation.
-heart must be between ${heartLo} and ${heartHi}${heartKnown ? ` (previous value was ${prevHeart})` : ' — heart has not been established yet, infer an appropriate value from the narrative'}.]
-
-Previous tracker state (for reference — update location if the scene moved):
-${prevTrackerText}
-
-${contextText}
-
-[TRACKER]
-time: h:MM AM/PM; MM/DD/YYYY (DayOfWeek)
+time: ${msg.is_user && regenPrevTime ? regenPrevTime : 'h:MM AM/PM; MM/DD/YYYY (DayOfWeek)'}
 location: Where the scene takes place at the START of this message
 weather: Weather description, Temperature
-heart: integer_value between ${heartLo} and ${heartHi}
+heart: ${msg.is_user ? prevHeart : `integer between ${heartLo} and ${heartHi}`}
 characters:
-${charsTemplate}
+- name: CharacterName | description: Physical description | outfit: Clothing description | state: Emotional/physical state | position: Where in the scene
 [/TRACKER]`;
-        }
 
-        // Completely clear the extension prompt before the quiet generation so the AI
-        // only sees the conversation history up to mesId and the explicit genPrompt above.
-        // If we left injectPrompt() active it would supply s.heartPoints (current latest value)
-        // and the current tracker state — causing regen to bleed in future context.
-        setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
-        let response;
-        try {
-            response = await generateQuietPrompt(genPrompt, false, true);
-        } finally {
-            // Always restore the full prompt regardless of outcome
-            injectPrompt(true);
-        }
+        ttDebug(`  regen #${mesId}: prevHeart=${prevHeart} range=[${heartLo},${heartHi}] prevTime="${regenPrevTime || 'none'}" roster=${roster.size} chars`);
+
+        // ── Call AI with limited context window ──
+        // Only current message + 5 previous messages are visible to the AI.
+        // This prevents future messages from leaking in and causing the AI
+        // to respond about the wrong scene.
+        const CONTEXT_WINDOW = 6;
+        const response = await generateWithLimitedContext(ctx, mesId, genPrompt, CONTEXT_WINDOW);
 
         ttDebug(`  regen #${mesId}: raw response="${(response || '').slice(0, 200).replace(/\n/g, '\\n')}"`);
 
         let data = parseTrackerBlock(response);
-        const aiReturnedTracker = !!data;
         ttDebug(`  regen #${mesId}: parsed=${data ? `time="${data.time}" heart=${data.heart} chars=${(data.characters||[]).map(c=>c.name).join(',')}` : 'null (no [TRACKER] block)'}`);
 
         // Fallback: if the AI returned roleplay instead of a tracker block,
-        // build from existing tracker data. For regen, the existing tt_tracker
-        // is preferred over STTracker (user may have already corrected it).
+        // build from existing tracker data.
         if (!data) {
             ttDebug(`  regen #${mesId}: AI returned no tracker block — using fallback`);
             const existingTracker = msg.extra?.tt_tracker;
+            const currentSTData   = tryImportSTTracker(msg);
+            const prevTrackerObj  = getMostRecentTracker(ctx.chat, mesId);
 
             if (existingTracker) {
                 data = { ...existingTracker, characters: (existingTracker.characters || []).map(c => ({...c})) };
@@ -1245,104 +1252,25 @@ ${charsTemplate}
                 data = { ...prevTrackerObj, characters: (prevTrackerObj.characters || []).map(c => ({...c})) };
                 ttDebug(`  regen #${mesId}: base from prev tracker`);
             } else {
-                data = {
-                    time:       'Unknown',
-                    location:   'Unknown',
-                    weather:    'Unknown',
-                    heart:      prevHeart,
-                    characters: [],
-                };
+                data = { time: 'Unknown', location: 'Unknown', weather: 'Unknown', heart: prevHeart, characters: [] };
             }
         }
 
-        // ── Merge character details from the AI/existing data into detected characters ──
-        // Text detection determines WHO is present (the character list), but
-        // the AI or existing tracker may have useful detail data (description,
-        // outfit, state, position) that we want to keep. Build a lookup from
-        // whatever data source we have and merge into the detected characters.
-        if (detectedChars) {
-            // Build a lookup of character details from the data source (AI response or fallback)
-            const detailLookup = new Map();
-            for (const c of (data.characters || [])) {
-                if (c.name) detailLookup.set(c.name, c);
-            }
-
-            data.characters = detectedChars.map(dc => {
-                const detail = detailLookup.get(dc.name);
-                return {
-                    name:        dc.name,
-                    // Description and outfit are stable across scenes — prefer roster data
-                    description: dc.description || detail?.description || '',
-                    outfit:      dc.outfit      || detail?.outfit      || '',
-                    // State and position: use AI response as default. The focused
-                    // character prompt will override these with scene-accurate data
-                    // when it succeeds (but it sometimes returns roleplay, so we
-                    // need a fallback rather than leaving them blank).
-                    state:       detail?.state    || dc.state    || '',
-                    position:    detail?.position || dc.position || '',
-                };
-            });
-            ttDebug(`  regen #${mesId}: characters from text detection: ${data.characters.map(c => `${c.name}(desc=${c.description ? 'yes' : 'no'})`).join(',')}`);
-
-            // ── Fill character state/position (and any blank descriptions) via focused AI prompt ──
-            // State and position are always blank at this point (scene-specific, can't carry over).
-            // The focused prompt reads ONLY the current message text, ensuring correct scene data.
-            const needsFill = data.characters.filter(c => !c.description || !c.outfit || !c.state || !c.position);
-            if (needsFill.length > 0 && msg.mes) {
-                const charNames = needsFill.map(c => c.name).join(', ');
-                const charDescPrompt =
-`[OOC: Based on this scene excerpt, describe each listed character as they appear at the BEGINNING of this scene. Reply with ONLY the formatted lines below — no story text, no dialogue, nothing else.
-Format per character (one line each):
-Name | description | outfit | state | position
-IMPORTANT: State and position must reflect what characters are doing in THIS scene, not any other scene.
-Example:
-Nathan | 35 year old man, lean build, brown hair | Gray t-shirt, faded blue jeans, work boots | Nervous, restless energy | Unpacking gear in inn room]
-
-Characters to describe: ${charNames}
-
-"${(msg.mes || '').slice(0, 800)}"`;
-
-                try {
-                    setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
-                    const charResp = await generateQuietPrompt(charDescPrompt, false, true);
-                    injectPrompt(true);
-                    ttDebug(`  regen #${mesId}: charDesc raw="${charResp.slice(0, 300).replace(/\n/g, '\\n')}"`);
-
-                    const looksLikeRoleplay = charResp.startsWith('(') || charResp.startsWith('*') || charResp.startsWith('"') || charResp.length > 1200;
-                    if (!looksLikeRoleplay) {
-                        const respLines = charResp.trim().split('\n').map(l => l.trim()).filter(l => l.length > 0);
-                        for (const line of respLines) {
-                            const parts = line.split('|').map(p => p.trim());
-                            if (parts.length >= 3) {
-                                const matchName = parts[0];
-                                const target = data.characters.find(c =>
-                                    c.name.toLowerCase() === matchName.toLowerCase() ||
-                                    c.name.split(/\s+/)[0].toLowerCase() === matchName.split(/\s+/)[0].toLowerCase()
-                                );
-                                if (target) {
-                                    if (!target.description && parts[1]) target.description = parts[1];
-                                    if (!target.outfit && parts[2])      target.outfit      = parts[2];
-                                    if (!target.state && parts[3])       target.state       = parts[3];
-                                    if (!target.position && parts[4])    target.position    = parts[4];
-                                    ttDebug(`  regen #${mesId}: filled char "${target.name}" desc="${target.description ? 'yes' : 'no'}"`);
-                                }
-                            }
-                        }
-                    } else {
-                        ttDebug(`  regen #${mesId}: charDesc returned roleplay, keeping blank fields`);
-                    }
-                } catch (e) {
-                    ttDebug(`  regen #${mesId}: charDesc ERROR ${e.message}`);
-                    injectPrompt(true);
+        // ── Merge roster description/outfit into AI-detected characters ──
+        // The AI determines WHO is present, but the roster has the most complete
+        // description/outfit data accumulated across the entire chat.
+        if (data.characters && roster.size > 0) {
+            for (const c of data.characters) {
+                const entry = roster.get(c.name);
+                if (entry) {
+                    if (!c.description) c.description = entry.description || '';
+                    if (!c.outfit)      c.outfit      = entry.outfit      || '';
                 }
             }
         }
 
-        // ── Extract location/weather from the current message ──
-        // The full tracker prompt often returns wrong locations because it
-        // includes prior context or the previous tracker's location.
-        // Use a focused prompt that looks at ONLY the current message text.
-        // Runs for BOTH user and AI messages.
+        // ── Focused location/weather prompt (safety check) ──
+        // Reads ONLY the current message text to verify/correct location.
         if (msg.mes) {
             const locPrompt =
 `[OOC: Based on ONLY this scene excerpt, answer two questions.
@@ -1355,13 +1283,9 @@ Cool evening, mountain breeze]
 "${(msg.mes || '').slice(0, 800)}"`;
 
             try {
-                setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
-                const locResp = await generateQuietPrompt(locPrompt, false, true);
-                injectPrompt(true);
+                const locResp = await generateWithLimitedContext(ctx, mesId, locPrompt, CONTEXT_WINDOW);
                 ttDebug(`  regen #${mesId}: locPrompt raw="${locResp.slice(0, 200).replace(/\n/g, '\\n')}"`);
 
-                // Try to extract location/weather from the response.
-                // Accept if the response is short (no roleplay) and has real content.
                 const lines = locResp.trim().split('\n').map(l => l.trim()).filter(l => l.length > 0);
                 const looksLikeRoleplay = locResp.startsWith('(') || locResp.startsWith('*') || locResp.startsWith('"') || locResp.length > 400;
 
@@ -1383,36 +1307,13 @@ Cool evening, mountain breeze]
                 }
             } catch (e) {
                 ttDebug(`  regen #${mesId}: locPrompt ERROR ${e.message}`);
-                injectPrompt(true);
             }
         }
 
-        // ── Time handling ──
-        // For user messages: always compute ourselves (explicit time extraction + heuristic).
-        // For AI messages: trust the AI's time when it returned a valid tracker block,
-        // since only the AI can understand narrative context like "meeting at 7 AM"
-        // mentioned several posts earlier. Fall back to heuristic only when the AI
-        // failed (returned roleplay / no tracker block) and we're using stale fallback data.
+        // ── Heart handling ──
         if (msg.is_user) {
             data.heart = prevHeart;
-            if (regenPrevTime) {
-                data.time = advanceTimeString(regenPrevTime, regenNudge);
-            }
         } else {
-            if (regenPrevTime) {
-                if (aiReturnedTracker && data.time && data.time !== 'h:MM AM/PM; MM/DD/YYYY (DayOfWeek)') {
-                    // AI returned a tracker with a time — trust it (context-aware)
-                    ttDebug(`  regen #${mesId}: keeping AI time="${data.time}" (AI returned tracker block)`);
-                } else {
-                    // AI failed — use explicit time extraction + heuristic fallback
-                    const nudge = estimateMinutesFromContent(msg.mes || '', regenPrevTime);
-                    data.time = advanceTimeString(regenPrevTime, nudge);
-                    ttDebug(`  regen #${mesId}: heuristic time: prev="${regenPrevTime}" +${nudge}min → "${data.time}"`);
-                }
-            }
-
-            // Heart: if the AI provided a valid heart in the tracker block, clamp it.
-            // Otherwise generate via hybrid (AI + heuristic fallback).
             if (data.heart !== null && data.heart !== undefined && !isNaN(parseInt(data.heart, 10))) {
                 data.heart = heartKnown
                     ? clampHeart(data.heart, prevHeart, maxShift)
@@ -1434,14 +1335,12 @@ Cool evening, mountain breeze]
         await ctx.saveChat();
         saveSettingsDebounced();
         renderMessageTracker(mesId);
-        ttDebug(`  regen #${mesId}: done — time="${data.time}" heart=${data.heart}`);
+        ttDebug(`  regen #${mesId}: done — time="${data.time}" heart=${data.heart} chars=${(data.characters||[]).map(c=>c.name).join(',')}`);
     } catch (err) {
         console.warn(`[TurboTracker] Regen failed for message #${mesId}:`, err);
         ttDebug(`  regen #${mesId}: ERROR ${err.message}`);
-        injectPrompt(true); // ensure prompt is restored on error too
+        injectPrompt(true);
     } finally {
-        // Always restore the button — renderMessageTracker rebuilds the HTML,
-        // but if it didn't run (error/early exit), re-enable the old button
         btn.prop('disabled', false).html('<i class="fa-solid fa-rotate"></i> Regenerate Tracker');
     }
 }
