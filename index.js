@@ -267,47 +267,53 @@ function estimateMinutesFromContent(text, prevTimeStr) {
     }
 
     // ── Time-of-day keywords — jump to the stated time of day ──
-    // If the text explicitly says "evening air", "morning sun", etc.
-    // and we know the previous time, compute the minutes needed to reach
-    // the appropriate hour. Handles both same-day and overnight jumps.
-    // IMPORTANT: Only jump if prevTime is significantly BEFORE the target
-    // range (>2 hours away). If already near the target (e.g. 6:50 AM and
-    // text says "good morning"), it's just a greeting, not a time jump.
+    // Only jump if the previous time is NOT already within the relevant
+    // time-of-day range. "Good morning" at 6:50 AM is just a greeting,
+    // not a cue to jump forward. Only jump when the time is clearly in
+    // a different part of the day (e.g. midnight → morning, noon → evening).
     if (prevHour24 !== null) {
-        // "evening" / "dusk" / "sunset" → ~17:00-18:00
+        // "evening" / "dusk" / "sunset" → ~17:00-18:00 (skip if already 15-20)
         if (/\b(?:the\s+)?evening\b(?:\s+(?:air|sky|sun|light|breeze|chill|glow|hours?))?/.test(t) ||
             /\b(?:dusk|sunset|sundown)\b/.test(t)) {
-            const target = r(17, 18); // 5-6 PM
-            if (prevHour24 < target && (target - prevHour24) > 2) {
-                return (target - prevHour24) * 60 + r(0, 30);
-            } else if (prevHour24 >= 22) {
-                return (24 - prevHour24 + target) * 60 + r(0, 30);
+            const target = r(17, 18);
+            if (!(prevHour24 >= 15 && prevHour24 <= 20)) {
+                if (prevHour24 < target) {
+                    return (target - prevHour24) * 60 + r(0, 30);
+                } else if (prevHour24 >= 22) {
+                    return (24 - prevHour24 + target) * 60 + r(0, 30);
+                }
             }
         }
-        // "afternoon" → ~13:00-15:00
+        // "afternoon" → ~13:00-15:00 (skip if already 11-16)
         if (/\b(?:the\s+)?afternoon\b(?:\s+(?:sun|light|heat|breeze|hours?))?/.test(t)) {
             const target = r(13, 15);
-            if (prevHour24 < target && (target - prevHour24) > 2) {
-                return (target - prevHour24) * 60 + r(0, 30);
-            } else if (prevHour24 >= 20) {
-                return (24 - prevHour24 + target) * 60 + r(0, 30);
+            if (!(prevHour24 >= 11 && prevHour24 <= 16)) {
+                if (prevHour24 < target) {
+                    return (target - prevHour24) * 60 + r(0, 30);
+                } else if (prevHour24 >= 20) {
+                    return (24 - prevHour24 + target) * 60 + r(0, 30);
+                }
             }
         }
-        // "morning" / "dawn" / "sunrise" / "awaken" / "wake up" → ~7:00-9:00
+        // "morning" / "dawn" / "sunrise" / "awaken" / "wake up" → ~7:00-9:00 (skip if already 5-10)
         if (/\b(?:the\s+)?(?:morning|dawn|sunrise)\b/.test(t) ||
             /\b(?:awaken(?:ed|s|ing)?|wak(?:e[sd]?|ing)\s+up|woke\s+up)\b/.test(t)) {
             const target = r(7, 9);
-            if (prevHour24 < target && (target - prevHour24) > 2) {
-                return (target - prevHour24) * 60 + r(0, 30);
-            } else if (prevHour24 >= 17) {
-                return (24 - prevHour24 + target) * 60 + r(0, 30);
+            if (!(prevHour24 >= 5 && prevHour24 <= 10)) {
+                if (prevHour24 < target) {
+                    return (target - prevHour24) * 60 + r(0, 30);
+                } else if (prevHour24 >= 17) {
+                    return (24 - prevHour24 + target) * 60 + r(0, 30);
+                }
             }
         }
-        // "night" / "midnight" / "late at night" → ~21:00-23:00
+        // "night" / "midnight" / "late at night" → ~21:00-23:00 (skip if already 19+)
         if (/\b(?:the\s+)?(?:night(?:\s+(?:air|sky|breeze))?|midnight|late\s+at\s+night)\b/.test(t)) {
             const target = r(21, 23);
-            if (prevHour24 < target && (target - prevHour24) > 2) {
-                return (target - prevHour24) * 60 + r(0, 30);
+            if (!(prevHour24 >= 19)) {
+                if (prevHour24 < target) {
+                    return (target - prevHour24) * 60 + r(0, 30);
+                }
             }
         }
     }
@@ -1267,12 +1273,12 @@ ${charsTemplate}
                     // Description and outfit are stable across scenes — prefer roster data
                     description: dc.description || detail?.description || '',
                     outfit:      dc.outfit      || detail?.outfit      || '',
-                    // State and position are ALWAYS blank here — the main AI prompt
-                    // frequently generates them from prior context (wrong scene).
-                    // The focused character description prompt below will fill them
-                    // using ONLY the current message text.
-                    state:       '',
-                    position:    '',
+                    // State and position: use AI response as default. The focused
+                    // character prompt will override these with scene-accurate data
+                    // when it succeeds (but it sometimes returns roleplay, so we
+                    // need a fallback rather than leaving them blank).
+                    state:       detail?.state    || dc.state    || '',
+                    position:    detail?.position || dc.position || '',
                 };
             });
             ttDebug(`  regen #${mesId}: characters from text detection: ${data.characters.map(c => `${c.name}(desc=${c.description ? 'yes' : 'no'})`).join(',')}`);
