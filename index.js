@@ -20,6 +20,7 @@ const DEFAULT_SETTINGS = {
     heartPoints: 0,
     heartSensitivity: 5,
     defaultHeartValue: 0,
+    minTimeAdvance: 2,
     heartColors: [
         { emoji: '🖤', min: 0,     max: 4999  },
         { emoji: '💜', min: 5000,  max: 19999 },
@@ -80,6 +81,27 @@ function clampHeart(rawValue, prevHeart, maxShift) {
  * Leaves the date/era suffix (e.g. "; 01/20/31 BBY (Monday)") unchanged.
  * If the format isn't recognised, the original string is returned unmodified.
  */
+/**
+ * Parse a tracker time string into total minutes since midnight.
+ * Handles both "H:MM AM/PM" and "HH:MM:SS" formats.
+ * Returns null if the format isn't recognised.
+ */
+function parseTimeToMinutes(timeStr) {
+    if (!timeStr) return null;
+    const m = timeStr.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+    if (m) {
+        let h = parseInt(m[1], 10);
+        const min = parseInt(m[2], 10);
+        const p = m[3].toUpperCase();
+        if (p === 'PM' && h !== 12) h += 12;
+        if (p === 'AM' && h === 12) h = 0;
+        return h * 60 + min;
+    }
+    const m2 = timeStr.match(/^(\d{1,2}):(\d{2})(?::\d{2})?/);
+    if (m2) return parseInt(m2[1], 10) * 60 + parseInt(m2[2], 10);
+    return null;
+}
+
 function advanceTimeString(timeStr, minutes) {    if (!timeStr) return timeStr;
 
     // Helper: advance date portion by N days
@@ -1348,6 +1370,23 @@ Cool evening, thin mountain air, 55°F]
             s.heartPoints = parseInt(data.heart, 10) || 0;
         }
 
+        // ── Minimum time advance floor ──
+        // If the AI returned the same time or barely advanced it, and the user
+        // has configured a minimum, force-advance by at least that many minutes.
+        const minAdv = parseInt(s.minTimeAdvance, 10) || 0;
+        if (minAdv > 0 && regenPrevTime && data.time) {
+            const prevMins = parseTimeToMinutes(regenPrevTime);
+            const aiMins   = parseTimeToMinutes(data.time);
+            if (prevMins !== null && aiMins !== null) {
+                let delta = aiMins - prevMins;
+                if (delta < 0) delta += 24 * 60; // overnight wrap
+                if (delta < minAdv) {
+                    data.time = advanceTimeString(regenPrevTime, minAdv);
+                    ttDebug(`  regen #${mesId}: time floor: AI delta=${delta}min < min ${minAdv}min → "${data.time}"`);
+                }
+            }
+        }
+
         msg.extra = msg.extra || {};
         msg.extra.tt_tracker = data;
         await ctx.saveChat();
@@ -2215,6 +2254,16 @@ function loadSettingsUi() {
 
             <hr class="tt-divider">
 
+            <div class="tt-setting-row">
+                <span class="tt-setting-label">Min Time Advance</span>
+                <input type="number" id="tt-min-time-advance" class="tt-heart-num-input text_pole"
+                       min="0" max="99" step="1" value="${s.minTimeAdvance ?? 2}">
+                <span class="tt-sensitivity-val">min</span>
+            </div>
+            <small>Minimum minutes to advance time per Regenerate. If the AI returns less than this, the floor is applied. Set to 0 to disable.</small>
+
+            <hr class="tt-divider">
+
             <div class="inline-drawer tt-heart-drawer">
                 <div class="inline-drawer-toggle inline-drawer-header tt-heart-drawer-header">
                     <b>💘 Heart Meter</b>
@@ -2304,6 +2353,12 @@ function loadSettingsUi() {
     $('#tt-default-heart').on('input', function () {
         const val = Math.max(0, Math.min(99999, parseInt(this.value) || 0));
         getSettings().defaultHeartValue = val;
+        saveSettingsDebounced();
+    });
+
+    $('#tt-min-time-advance').on('input', function () {
+        const val = Math.max(0, Math.min(99, parseInt(this.value) || 0));
+        getSettings().minTimeAdvance = val;
         saveSettingsDebounced();
     });
 
