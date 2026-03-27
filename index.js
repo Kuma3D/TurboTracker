@@ -660,10 +660,24 @@ Reply with ONLY a signed integer like +${r100(shift * 0.3)} or -${r100(shift * 0
 
 /**
  * Parse a [TRACKER]...[/TRACKER] block from raw message text.
+ * Handles both properly closed blocks and unclosed blocks (common with Claude
+ * when generation gets cut off mid-tracker).
  * Returns null if no block is found.
  */
 function parseTrackerBlock(text) {
-    const match = text.match(/\[TRACKER\]([\s\S]*?)\[\/TRACKER\]/i);
+    if (!text) return null;
+
+    // Try closed block first
+    let match = text.match(/\[TRACKER\]([\s\S]*?)\[\/TRACKER\]/i);
+
+    // If no closed block, try unclosed block (Claude often cuts off before [/TRACKER])
+    if (!match) {
+        match = text.match(/\[TRACKER\]([\s\S]*)/i);
+        if (match) {
+            ttDebug('parseTrackerBlock: found unclosed [TRACKER] block, parsing partial content');
+        }
+    }
+
     if (!match) return null;
 
     const result = { time: null, location: null, weather: null, heart: null, characters: [] };
