@@ -1084,7 +1084,7 @@ function renderMessageTracker(mesId) {
     // Strip any lingering [TRACKER] block from the displayed HTML (AI messages only)
     if (!msg.is_user) {
         mesText.html(
-            mesText.html().replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim()
+            mesText.html().replace(/\[TRACKER\][\s\S]*?(?:\[\/TRACKER\]|$)/gi, '').trim()
         );
     }
 
@@ -1153,7 +1153,8 @@ async function processMessage(mesId) {
         }
 
         // Permanently strip the tracker block from msg.mes so it never renders again
-        msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
+        // Handle both closed [TRACKER]...[/TRACKER] and unclosed [TRACKER]... (cutoff)
+        msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?(?:\[\/TRACKER\]|$)/gi, '').trim();
 
         msg.extra = msg.extra || {};
         msg.extra.tt_tracker = data;
@@ -1712,7 +1713,7 @@ async function populateAllMessages() {
 
             // Strip any leftover [TRACKER] text from msg.mes regardless of path
             if ((msg.mes || '').match(/\[TRACKER\]/i)) {
-                msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
+                msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?(?:\[\/TRACKER\]|$)/gi, '').trim();
             }
 
             // ── Priority 1: STTracker data on this exact message ──────────
@@ -1887,7 +1888,7 @@ ${fillCharsText}
                     existing.heart = clampHeart(existing.heart, s.heartPoints, maxShift);
                 }
                 if (existing.heart !== null) s.heartPoints = existing.heart;
-                msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
+                msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?(?:\[\/TRACKER\]|$)/gi, '').trim();
                 msg.extra = msg.extra || {};
                 msg.extra.tt_tracker = existing;
                 renderMessageTracker(idx);
@@ -2150,7 +2151,7 @@ function onUserMessageRendered(mesId) {
     // message. Without this, the AI sees a stale tracker in the user turn and uses
     // it as a baseline instead of the correct prior-message tracker.
     if ((msg.mes || '').match(/\[TRACKER\]/i)) {
-        msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
+        msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?(?:\[\/TRACKER\]|$)/gi, '').trim();
         const mesText = $(`.mes[mesid="${mesId}"] .mes_text`);
         if (mesText.length) {
             mesText.html(mesText.html().replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim());
@@ -2197,7 +2198,7 @@ function onChatChanged() {
         // Clean up any lingering [TRACKER] text in msg.mes — covers both AI messages
         // that weren't stripped at render time and impersonated user messages.
         if ((msg.mes || '').match(/\[TRACKER\]/i)) {
-            msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?\[\/TRACKER\]/gi, '').trim();
+            msg.mes = (msg.mes || '').replace(/\[TRACKER\][\s\S]*?(?:\[\/TRACKER\]|$)/gi, '').trim();
             modified = true;
         }
         if (msg.extra?.tt_tracker) {
