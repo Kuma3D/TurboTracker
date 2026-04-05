@@ -1396,8 +1396,9 @@ Cool evening, thin mountain air, 55°F]
                 let delta = aiMins - prevMins;
                 if (delta < 0) delta += 24 * 60; // overnight wrap
                 if (delta < minAdv) {
-                    data.time = advanceTimeString(regenPrevTime, minAdv);
-                    ttDebug(`  regen #${mesId}: time floor: AI delta=${delta}min < min ${minAdv}min → "${data.time}"`);
+                    const variance = Math.floor(Math.random() * 6); // 0-5 minutes
+                    data.time = advanceTimeString(regenPrevTime, minAdv + variance);
+                    ttDebug(`  regen #${mesId}: time floor: AI delta=${delta}min < min ${minAdv}min → "${data.time}" (+${variance} variance)`);
                 }
             }
         }
