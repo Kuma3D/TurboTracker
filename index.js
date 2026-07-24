@@ -569,11 +569,14 @@ function detectCharactersInMessage(chat, mesId) {
  * because they're scene-specific and shouldn't carry over.
  */
 function buildCharacterRoster(chat) {
+    // NOTE: roster carries the STABLE physical description only. Outfit is NOT
+    // accumulated here — it changes when clothes change (e.g. when the user
+    // edits the character card), so freezing an old outfit would lock the
+    // tracker to stale clothing. Regen reads the current card for outfit.
     const roster = new Map();
     const merge = (existing, incoming) => ({
         name:        incoming.name,
         description: incoming.description || existing.description || '',
-        outfit:      incoming.outfit      || existing.outfit      || '',
     });
     for (let i = 0; i < chat.length; i++) {
         const tt = chat[i]?.extra?.tt_tracker;
@@ -581,7 +584,7 @@ function buildCharacterRoster(chat) {
             for (const c of tt.characters) {
                 if (!c.name) continue;
                 const prev = roster.get(c.name);
-                roster.set(c.name, prev ? merge(prev, c) : { name: c.name, description: c.description || '', outfit: c.outfit || '' });
+                roster.set(c.name, prev ? merge(prev, c) : { name: c.name, description: c.description || '' });
             }
         }
         const st = chat[i]?.tracker;
@@ -591,7 +594,7 @@ function buildCharacterRoster(chat) {
                 for (const c of imported.characters) {
                     if (!c.name) continue;
                     const prev = roster.get(c.name);
-                    roster.set(c.name, prev ? merge(prev, c) : { name: c.name, description: c.description || '', outfit: c.outfit || '' });
+                    roster.set(c.name, prev ? merge(prev, c) : { name: c.name, description: c.description || '' });
                 }
             }
         }
@@ -922,7 +925,7 @@ function getMostRecentSTTrackerTime(chat, beforeMesId) {
  * a more recent AI-generated tracker time, while still using STTracker times
  * when they come from a message that appeared after the last tt_tracker.
  */
-function getBestPrevContext(chat, beforeMesId) {
+function getBestPrevContext(chat, beforeMesId, stripVolatile = false) {
     // Find the most recent tt_tracker and the message index it came from
     let ttTracker = null;
     let ttIdx = -1;
@@ -973,7 +976,7 @@ function getBestPrevContext(chat, beforeMesId) {
             }
         }
         return {
-            trackerText: formatTrackerForPrompt(patched),
+            trackerText: formatTrackerForPrompt(patched, stripVolatile),
             prevHeart,
             prevTime,
         };
@@ -994,7 +997,7 @@ function getBestPrevContext(chat, beforeMesId) {
                 break;
             }
         }
-        return { trackerText: formatTrackerForPrompt(synth), prevHeart: 0, prevTime: stTime };
+        return { trackerText: formatTrackerForPrompt(synth, stripVolatile), prevHeart: 0, prevTime: stTime };
     }
 
     return { trackerText: 'None', prevHeart: 0, prevTime: null };
@@ -1003,8 +1006,24 @@ function getBestPrevContext(chat, beforeMesId) {
 /**
  * Format a tt_tracker object as plain text for use in AI prompts.
  */
-function formatTrackerForPrompt(data) {
+function formatTrackerForPrompt(data, stripVolatile = false) {
     if (!data) return 'None';
+    // stripVolatile (used by Regen): omit outfit/state/position from each
+    // character so the AI can't just copy the previous tracker's clothing. It
+    // keeps name + description (stable physical traits) + heart for continuity,
+    // and the AI is separately told to re-derive the volatile fields fresh.
+    const charLine = (c, withHeart) => {
+        let line = `- name: ${c.name} | description: ${c.description || '???'}`;
+        if (!stripVolatile) {
+            line += ` | outfit: ${c.outfit || '???'} | state: ${c.state || '???'} | position: ${c.position || '???'}`;
+        }
+        if (withHeart) {
+            const h = (c.heart !== undefined && c.heart !== null && !isNaN(parseInt(c.heart, 10)))
+                ? (parseInt(c.heart, 10) || 0) : 'unknown';
+            line += ` | heart: ${h}`;
+        }
+        return line;
+    };
     // Group chats carry heart per character; render the previous state in that
     // shape so the AI sees individual hearts and only shifts the speaker's.
     if (isGroupChat(getContext())) {
@@ -1012,11 +1031,7 @@ function formatTrackerForPrompt(data) {
         const chars = data.characters || [];
         if (chars.length > 0) {
             text += '\ncharacters:';
-            for (const c of chars) {
-                const h = (c.heart !== undefined && c.heart !== null && !isNaN(parseInt(c.heart, 10)))
-                    ? (parseInt(c.heart, 10) || 0) : 'unknown';
-                text += `\n- name: ${c.name} | description: ${c.description || '???'} | outfit: ${c.outfit || '???'} | state: ${c.state || '???'} | position: ${c.position || '???'} | heart: ${h}`;
-            }
+            for (const c of chars) text += `\n${charLine(c, true)}`;
         }
         return text;
     }
@@ -1026,9 +1041,7 @@ function formatTrackerForPrompt(data) {
     let text = `time: ${data.time || 'Unknown'}\nlocation: ${data.location || 'Unknown'}\nweather: ${data.weather || 'Unknown'}\nheart: ${heartDisplay}`;
     if (data.characters && data.characters.length > 0) {
         text += '\ncharacters:';
-        for (const c of data.characters) {
-            text += `\n- name: ${c.name} | description: ${c.description} | outfit: ${c.outfit} | state: ${c.state} | position: ${c.position}`;
-        }
+        for (const c of data.characters) text += `\n${charLine(c, false)}`;
     }
     return text;
 }
@@ -1360,7 +1373,10 @@ async function regenTracker(mesId) {
         const s        = getSettings();
         const maxShift = (Number(s.heartSensitivity) || 5) * 500;
 
-        const { trackerText: prevTrackerText, prevHeart: rawPrevHeart, prevTime: regenPrevTime } = getBestPrevContext(ctx.chat, mesId);
+        // Regen re-derives volatile fields (outfit/state/position) fresh, so we strip
+// them from the previous-tracker reference to prevent the AI from echoing the
+// old outfit — the root cause of "regen keeps the exact same outfit".
+        const { trackerText: prevTrackerText, prevHeart: rawPrevHeart, prevTime: regenPrevTime } = getBestPrevContext(ctx.chat, mesId, true);
         const heartKnown = rawPrevHeart !== null;
         const prevHeart  = heartKnown ? rawPrevHeart : 0;
         const heartLo    = heartKnown ? Math.max(0,     prevHeart - maxShift) : 0;
@@ -1368,10 +1384,15 @@ async function regenTracker(mesId) {
 
         // Build roster of known characters for description/outfit reference.
         // The AI will determine which characters are actually present in the scene.
+        // The roster carries only STABLE physical description (hair/eyes/build) for
+        // reference. Outfit/state/position are volatile and scene-driven — we never
+        // feed a previous outfit here, because that anchors the AI to stale clothing
+        // (e.g. an Author's Note saying "everyone is topless" would be ignored).
         const roster = buildCharacterRoster(ctx.chat);
         const rosterRef = roster.size > 0
-            ? '\nKnown characters (use for description/outfit reference — only include those present in the scene):\n' +
-              Array.from(roster.values()).map(c => `- ${c.name}: ${c.description || '???'} | outfit: ${c.outfit || '???'}`).join('\n')
+            ? '\nKnown characters (include only those present in the scene; description = stable physical traits for reference):\n' +
+              Array.from(roster.values()).map(c => `- ${c.name}: ${c.description || '???'}`).join('\n') +
+              '\nFor each present character, RE-DERIVE outfit, state, and position FRESH from the scene excerpt and any standing instructions in effect for this scene (such as Author\'s Note, character notes, or world info). Do NOT copy outfit/state/position from the previous tracker state — they may have changed. Only "description" (stable physical traits) may be carried forward; if the scene shows no clothing detail, state the outfit the scene implies from its instructions.'
             : '';
 
         const group = isGroupChat(ctx);
@@ -1396,6 +1417,7 @@ IMPORTANT:
 - Time: What time is it at the VERY FIRST LINE of the most recent message? Determine this from the full conversation context — including what happened in previous messages. If previous messages described travel, a long activity, or a significant time skip, the opening of the current message should reflect that elapsed time. Do NOT advance time to reflect where events lead by the END of the current message — only the opening moment matters.
 - Location: Where are the characters standing/sitting at the VERY FIRST LINE? Ignore where they travel to later in the message.
 - Characters: Include ALL characters present in the opening moment, including {{user}} if present${speakerClause}. State and position must reflect the opening moment, not the end of the message.
+- Outfit/state/position: the previous tracker state (shown below) OMITS these on purpose — you must RE-DERIVE them fresh from the scene excerpt and any standing instructions in effect for this scene (Author's Note, character notes, world info). Do NOT invent the old outfit; if an Author's Note dictates appearance/dress (e.g. "all girls are topless in panties"), that WINS over the character's usual attire.
 - ${heartInstr}]
 
 Previous tracker state (for reference — use context to determine how much time has passed since this):
@@ -1421,6 +1443,7 @@ IMPORTANT:
 - Time: What time is it at the VERY FIRST LINE of the most recent message? Determine this from the full conversation context — including what happened in previous messages. If previous messages described travel, a long activity, or a significant time skip, the opening of the current message should reflect that elapsed time. Do NOT advance time to reflect where events lead by the END of the current message — only the opening moment matters.
 - Location: Where are the characters standing/sitting at the VERY FIRST LINE? Ignore where they travel to later in the message.
 - Characters: Include ALL characters present in the opening moment, including {{user}} if present. State and position must reflect the opening moment, not the end of the message.
+- Outfit/state/position: the previous tracker state (shown below) OMITS these on purpose — you must RE-DERIVE them fresh from the scene excerpt and any standing instructions in effect for this scene (Author's Note, character notes, world info). Do NOT invent the old outfit; if an Author's Note dictates appearance/dress (e.g. "all girls are topless in panties"), that WINS over the character's usual attire.
 - ${heartInstr}]
 
 Previous tracker state (for reference — use context to determine how much time has passed since this):
@@ -1511,16 +1534,24 @@ ${genPrompt}`;
             }
         }
 
-        // ── Merge roster description/outfit into AI-detected characters ──
-        // The AI determines WHO is present, but the roster has the most complete
-        // description/outfit data accumulated across the entire chat.
+        // ── Merge roster description into AI-detected characters ──
+        // The AI determines WHO is present + their outfit/state/position fresh;
+        // the roster supplies only the stable physical description as a fallback.
         if (data.characters && roster.size > 0) {
             for (const c of data.characters) {
                 const entry = roster.get(c.name);
                 if (entry) {
+                    // description = stable physical traits; backfill from roster
+                    // only when the AI's block omitted it.
                     if (!c.description) c.description = entry.description || '';
-                    if (!c.outfit)      c.outfit      = entry.outfit      || '';
                 }
+                // outfit, state, and position are intentionally NOT backfilled from
+                // any prior tracker or the roster. They are volatile and scene/
+                // instruction-driven; backfilling an old value is what froze the
+                // tracker to stale data (e.g. ignoring an Author's Note). The AI is
+                // instructed to re-derive them fresh from the scene excerpt + any
+                // standing instructions (Author's Note, world info). If the AI omits
+                // outfit, leave it blank ("Unknown") rather than re-injecting stale.
             }
         }
 
@@ -1863,7 +1894,8 @@ TIME RULES — most important field:
 OTHER FIELD RULES:
   • Location: update if the user's message or your response shows characters moving somewhere new.
   • Weather: update only if the exchange gives a narrative reason.
-  • Characters: add or remove only as the scene requires.
+  • Characters: add or remove only as the scene requires. Keep each present character's state/position fresh to the current moment.
+  • Outfit: reflect what each character is actually wearing THIS exchange. Do NOT copy the previous tracker's outfit forward when the scene or a standing instruction (e.g. an Author's Note about appearance/dress) indicates otherwise — an Author's Note or world-info directive about appearance WINS over the previous outfit.
 
 ${heartSection}
 
