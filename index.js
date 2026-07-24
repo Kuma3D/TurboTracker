@@ -1373,10 +1373,14 @@ async function regenTracker(mesId) {
         const s        = getSettings();
         const maxShift = (Number(s.heartSensitivity) || 5) * 500;
 
-        // Regen re-derives volatile fields (outfit/state/position) fresh, so we strip
-// them from the previous-tracker reference to prevent the AI from echoing the
-// old outfit — the root cause of "regen keeps the exact same outfit".
-        const { trackerText: prevTrackerText, prevHeart: rawPrevHeart, prevTime: regenPrevTime } = getBestPrevContext(ctx.chat, mesId, true);
+        // Regen carries the previous tracker forward (outfit/state/position
+        // included) so an outfit the narrative DID establish is preserved across
+        // a regenerate (e.g. "wrapped in a towel" must not silently become
+        // "completely naked" on Regen just because the AI re-derives from the
+        // A/N). The prompt below tells the AI to keep those values UNLESS this
+        // exchange shows an explicit change OR a standing instruction (Author's
+        // Note, world info) requires one the narrative hasn't overridden.
+        const { trackerText: prevTrackerText, prevHeart: rawPrevHeart, prevTime: regenPrevTime } = getBestPrevContext(ctx.chat, mesId, false);
         const heartKnown = rawPrevHeart !== null;
         const prevHeart  = heartKnown ? rawPrevHeart : 0;
         const heartLo    = heartKnown ? Math.max(0,     prevHeart - maxShift) : 0;
@@ -1392,7 +1396,7 @@ async function regenTracker(mesId) {
         const rosterRef = roster.size > 0
             ? '\nKnown characters (include only those present in the scene; description = stable physical traits for reference):\n' +
               Array.from(roster.values()).map(c => `- ${c.name}: ${c.description || '???'}`).join('\n') +
-              '\nFor each present character, RE-DERIVE outfit, state, and position FRESH from the scene excerpt and any standing instructions in effect for this scene (such as Author\'s Note, character notes, or world info). Do NOT copy outfit/state/position from the previous tracker state — they may have changed. Only "description" (stable physical traits) may be carried forward; if the scene shows no clothing detail, state the outfit the scene implies from its instructions.'
+              '\nFor each present character, CARRY the previous tracker\'s outfit/state/position forward unchanged unless this exchange or a standing instruction (Author\'s Note, character notes, world info) requires a change the narrative hasn\'t overridden — see the Outfit/state/position rule above. Only "description" (stable physical traits) is supplied here from the roster; never use it as the outfit authority.'
             : '';
 
         const group = isGroupChat(ctx);
@@ -1417,7 +1421,7 @@ IMPORTANT:
 - Time: What time is it at the VERY FIRST LINE of the most recent message? Determine this from the full conversation context — including what happened in previous messages. If previous messages described travel, a long activity, or a significant time skip, the opening of the current message should reflect that elapsed time. Do NOT advance time to reflect where events lead by the END of the current message — only the opening moment matters.
 - Location: Where are the characters standing/sitting at the VERY FIRST LINE? Ignore where they travel to later in the message.
 - Characters: Include ALL characters present in the opening moment, including {{user}} if present${speakerClause}. State and position must reflect the opening moment, not the end of the message.
-- Outfit/state/position: the previous tracker state (shown below) OMITS these on purpose — you must RE-DERIVE them fresh from the scene excerpt and any standing instructions in effect for this scene (Author's Note, character notes, world info). Do NOT invent the old outfit; if an Author's Note dictates appearance/dress (e.g. "all girls are topless in panties"), that WINS over the character's usual attire.
+- Outfit/state/position: CARRY each character's PREVIOUS values forward unchanged, UNLESS this exchange shows an explicit change (someone dresses/undresses/wraps/moves/drops something) OR a standing instruction in effect for this scene (Author's Note, character notes, world info) requires a different value that the narrative has NOT overridden. Priority: a specific in-narrative clothing/state change ALWAYS wins; a standing appearance directive (Author's Note) wins over the usual card attire and over the previous outfit ONLY when the narrative has not established a specific clothing state; otherwise keep the previous value exactly. Do NOT drop an established outfit just because a general directive could imply less clothing.
 - ${heartInstr}]
 
 Previous tracker state (for reference — use context to determine how much time has passed since this):
@@ -1443,7 +1447,7 @@ IMPORTANT:
 - Time: What time is it at the VERY FIRST LINE of the most recent message? Determine this from the full conversation context — including what happened in previous messages. If previous messages described travel, a long activity, or a significant time skip, the opening of the current message should reflect that elapsed time. Do NOT advance time to reflect where events lead by the END of the current message — only the opening moment matters.
 - Location: Where are the characters standing/sitting at the VERY FIRST LINE? Ignore where they travel to later in the message.
 - Characters: Include ALL characters present in the opening moment, including {{user}} if present. State and position must reflect the opening moment, not the end of the message.
-- Outfit/state/position: the previous tracker state (shown below) OMITS these on purpose — you must RE-DERIVE them fresh from the scene excerpt and any standing instructions in effect for this scene (Author's Note, character notes, world info). Do NOT invent the old outfit; if an Author's Note dictates appearance/dress (e.g. "all girls are topless in panties"), that WINS over the character's usual attire.
+- Outfit/state/position: CARRY each character's PREVIOUS values forward unchanged, UNLESS this exchange shows an explicit change (someone dresses/undresses/wraps/moves/drops something) OR a standing instruction in effect for this scene (Author's Note, character notes, world info) requires a different value that the narrative has NOT overridden. Priority: a specific in-narrative clothing/state change ALWAYS wins; a standing appearance directive (Author's Note) wins over the usual card attire and over the previous outfit ONLY when the narrative has not established a specific clothing state; otherwise keep the previous value exactly. Do NOT drop an established outfit just because a general directive could imply less clothing.
 - ${heartInstr}]
 
 Previous tracker state (for reference — use context to determine how much time has passed since this):
@@ -1537,21 +1541,36 @@ ${genPrompt}`;
         // ── Merge roster description into AI-detected characters ──
         // The AI determines WHO is present + their outfit/state/position fresh;
         // the roster supplies only the stable physical description as a fallback.
-        if (data.characters && roster.size > 0) {
+        // Most recent tracker BEFORE this message — used to carry an established
+        // outfit/state/position forward when the AI blanked a field but didn't
+        // state a new value. This preserves continuity (e.g. "wrapped in a towel"
+        // stays) without overriding an intentional AI change.
+        const prevTrackerForCarry = getMostRecentTracker(ctx.chat, mesId);
+
+        // ── Merge roster description into AI-detected characters ──
+        // The AI determines WHO is present + their outfit/state/position; the
+        // roster supplies only the stable physical description as a fallback.
+        if (data.characters) {
             for (const c of data.characters) {
-                const entry = roster.get(c.name);
+                const entry = roster.size > 0 ? roster.get(c.name) : null;
                 if (entry) {
                     // description = stable physical traits; backfill from roster
                     // only when the AI's block omitted it.
                     if (!c.description) c.description = entry.description || '';
                 }
-                // outfit, state, and position are intentionally NOT backfilled from
-                // any prior tracker or the roster. They are volatile and scene/
-                // instruction-driven; backfilling an old value is what froze the
-                // tracker to stale data (e.g. ignoring an Author's Note). The AI is
-                // instructed to re-derive them fresh from the scene excerpt + any
-                // standing instructions (Author's Note, world info). If the AI omits
-                // outfit, leave it blank ("Unknown") rather than re-injecting stale.
+                // Outfit/state/position: the AI is told to carry the previous
+                // values forward unless the exchange or a standing instruction
+                // changes them. If it emitted a value, respect it; if it left a
+                // field blank, carry that field forward from the previous tracker
+                // (by name) so an established state isn't silently dropped. We do
+                // NOT override a non-blank value — an intentional change stands.
+                const prevChar = prevTrackerForCarry && Array.isArray(prevTrackerForCarry.characters)
+                    ? prevTrackerForCarry.characters.find(pc => pc.name === c.name) : null;
+                if (prevChar) {
+                    if (((c.outfit || '').trim() === '')   && prevChar.outfit)   c.outfit   = prevChar.outfit;
+                    if (((c.state || '').trim() === '')    && prevChar.state)    c.state    = prevChar.state;
+                    if (((c.position || '').trim() === '') && prevChar.position) c.position = prevChar.position;
+                }
             }
         }
 
@@ -1866,14 +1885,14 @@ ${changeRanges}
   List EVERY character currently present in the scene, INCLUDING the character you are speaking as right now — you rarely name yourself in narration, but you MUST still include your own card. Never omit the speaking character.
   Each line must use the pipe-separated format shown above, including a "heart: integer_value" field per character.
   description: physical description — hair color, eye color, height, build, notable features. Pull from character/user card if available; infer or estimate if not.
-  outfit: what the character is wearing RIGHT NOW. By default carry the previous outfit forward unchanged; only change it if the current exchange or a standing instruction (Author's Note, world info) indicates a change — in that case the appearance directive WINS over both the usual card attire and the previous outfit.
+  outfit: what the character is wearing RIGHT NOW. By default carry the previous outfit forward unchanged; only change it if the current exchange or a standing instruction (Author's Note, world info) indicates a change. A specific in-narrative clothing change wins; an A/N appearance directive wins over the usual card attire and the previous outfit ONLY when the narrative has not established a specific clothing state — never drop an outfit a character has visibly put on or wrapped just because a general directive could imply less clothing.
   state: specific emotional and/or physical condition (e.g. "Nervous, fidgeting with her braid" or "Relaxed, slightly flushed from the heat"). Carry forward unless this exchange changes it.
   position: precise placement and posture in the scene (e.g. "Leaning against the bar with arms crossed, facing the entrance" or "Seated across the table, hands wrapped around a mug, leaning slightly forward"). Carry forward unless this exchange moves them.`
         : `Characters section:
   List every character currently present in the scene.
   Each line must use the pipe-separated format shown above.
   description: physical description — hair color, eye color, height, build, notable features. Pull from character/user card if available; infer or estimate if not.
-  outfit: what the character is wearing RIGHT NOW. By default carry the previous outfit forward unchanged; only change it if the current exchange or a standing instruction (Author's Note, world info) indicates a change — in that case the appearance directive WINS over both the usual card attire and the previous outfit.
+  outfit: what the character is wearing RIGHT NOW. By default carry the previous outfit forward unchanged; only change it if the current exchange or a standing instruction (Author's Note, world info) indicates a change. A specific in-narrative clothing change wins; an A/N appearance directive wins over the usual card attire and the previous outfit ONLY when the narrative has not established a specific clothing state — never drop an outfit a character has visibly put on or wrapped just because a general directive could imply less clothing.
   state: specific emotional and/or physical condition (e.g. "Nervous, fidgeting with her braid" or "Relaxed, slightly flushed from the heat"). Carry forward unless this exchange changes it.
   position: precise placement and posture in the scene (e.g. "Leaning against the bar with arms crossed, facing the entrance" or "Seated across the table, hands wrapped around a mug, leaning slightly forward"). Carry forward unless this exchange moves them.`;
 
@@ -1882,7 +1901,7 @@ At the very end of EVERY response, after all narrative text, append a tracker bl
 
 ${blockExample}
 ${userMsgSection}
-PREVIOUS TRACKER STATE — your baseline. Carry ALL of it forward as-is (time, location, weather, heart, and each character's name, description, outfit, state, position) UNLESS the current exchange or a standing instruction in effect for this scene (Author's Note, character notes, world info) gives a reason to change something. Do NOT invent changes when nothing has changed — a quiet exchange should keep outfit/state/position identical to the previous tracker. When a standing instruction DOES dictate a change (e.g. an Author's Note about appearance/dress), that WINS over the character's usual attire and over what they wore before — apply it even if the previous tracker still shows the old value:
+PREVIOUS TRACKER STATE — your baseline. Carry ALL of it forward as-is (time, location, weather, heart, and each character's name, description, outfit, state, position) UNLESS the current exchange or a standing instruction in effect for this scene (Author's Note, character notes, world info) gives a reason to change something. Do NOT invent changes when nothing has changed — a quiet exchange should keep outfit/state/position identical to the previous tracker. Priority when a change is in question: a specific in-narrative clothing/state change (someone dresses, undresses, wraps, or moves) ALWAYS wins; a standing appearance directive (Author's Note, world info) wins over the character's usual card attire and over the previous outfit ONLY when the narrative has NOT established a specific clothing state. Do NOT drop an established outfit (e.g. a towel a character has visibly wrapped around themselves) just because a general directive could imply less clothing — keep what the narrative shows:
 ${currentTrackerText}
 
 TIME RULES — most important field:
@@ -1903,7 +1922,7 @@ OTHER FIELD RULES:
   • Location: update if the user's message or your response shows characters moving somewhere new.
   • Weather: update only if the exchange gives a narrative reason.
   • Characters: add or remove only as the scene requires. Keep each present character's state/position unless this exchange changes them.
-  • Outfit: by default, carry the previous outfit forward unchanged; only change it if the current exchange or a standing instruction (e.g. an Author's Note about appearance/dress) indicates a change — in that case, the Author's Note / world-info directive WINS over both the usual card attire and the previous outfit.
+  • Outfit: by default, carry the previous outfit forward unchanged; only change it if the current exchange or a standing instruction (Author's Note, world info) indicates a change. A specific in-narrative clothing change (someone dresses/undresses/wraps/drops something) ALWAYS wins; an Author's Note appearance directive wins over the usual card attire and the previous outfit ONLY when the narrative has not established a specific clothing state — never drop an established outfit because a general directive could imply less clothing.
 
 ${heartSection}
 
