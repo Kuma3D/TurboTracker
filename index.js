@@ -1783,12 +1783,13 @@ function injectPrompt(includeLatestUserMsg = true) {
     let currentTrackerText = 'No previous tracker yet — this is the start of the story.';
     for (let i = chat.length - 1; i >= 0; i--) {
         if (chat[i]?.extra?.tt_tracker) {
-            // stripVolatile: omit outfit/state/position from the baseline so the AI
-            // re-derives them each exchange from the scene + standing
-            // instructions (Author's Note, world info). This is what makes the
-            // tracker follow an A/N's randomized/varied appearance instead of
-            // copying the previous outfit forward forever.
-            currentTrackerText = formatTrackerForPrompt(chat[i].extra.tt_tracker, true);
+            // Carry the previous tracker forward IN FULL (including outfit/state/
+            // position) so data persists from post to post by default. The
+            // instructions below tell the AI to keep these unless the current
+            // exchange or a standing instruction (Author's Note, world info)
+            // dictates a change — that's what lets an A/N override stale data
+            // without us throwing away continuity entirely.
+            currentTrackerText = formatTrackerForPrompt(chat[i].extra.tt_tracker, false);
             break;
         }
     }
@@ -1865,23 +1866,23 @@ ${changeRanges}
   List EVERY character currently present in the scene, INCLUDING the character you are speaking as right now — you rarely name yourself in narration, but you MUST still include your own card. Never omit the speaking character.
   Each line must use the pipe-separated format shown above, including a "heart: integer_value" field per character.
   description: physical description — hair color, eye color, height, build, notable features. Pull from character/user card if available; infer or estimate if not.
-  outfit: what the character is wearing RIGHT NOW. Derive it from the current exchange + standing instructions (Author's Note, world info); an appearance directive WINS over the usual card attire. Do NOT reuse a previous outfit unless the scene still shows it.
-  state: specific emotional and/or physical condition (e.g. "Nervous, fidgeting with her braid" or "Relaxed, slightly flushed from the heat").
-  position: precise placement and posture in the scene (e.g. "Leaning against the bar with arms crossed, facing the entrance" or "Seated across the table, hands wrapped around a mug, leaning slightly forward").`
+  outfit: what the character is wearing RIGHT NOW. By default carry the previous outfit forward unchanged; only change it if the current exchange or a standing instruction (Author's Note, world info) indicates a change — in that case the appearance directive WINS over both the usual card attire and the previous outfit.
+  state: specific emotional and/or physical condition (e.g. "Nervous, fidgeting with her braid" or "Relaxed, slightly flushed from the heat"). Carry forward unless this exchange changes it.
+  position: precise placement and posture in the scene (e.g. "Leaning against the bar with arms crossed, facing the entrance" or "Seated across the table, hands wrapped around a mug, leaning slightly forward"). Carry forward unless this exchange moves them.`
         : `Characters section:
   List every character currently present in the scene.
   Each line must use the pipe-separated format shown above.
   description: physical description — hair color, eye color, height, build, notable features. Pull from character/user card if available; infer or estimate if not.
-  outfit: what the character is wearing RIGHT NOW. Derive it from the current exchange + standing instructions (Author's Note, world info); an appearance directive WINS over the usual card attire. Do NOT reuse a previous outfit unless the scene still shows it.
-  state: specific emotional and/or physical condition (e.g. "Nervous, fidgeting with her braid" or "Relaxed, slightly flushed from the heat").
-  position: precise placement and posture in the scene (e.g. "Leaning against the bar with arms crossed, facing the entrance" or "Seated across the table, hands wrapped around a mug, leaning slightly forward").`;
+  outfit: what the character is wearing RIGHT NOW. By default carry the previous outfit forward unchanged; only change it if the current exchange or a standing instruction (Author's Note, world info) indicates a change — in that case the appearance directive WINS over both the usual card attire and the previous outfit.
+  state: specific emotional and/or physical condition (e.g. "Nervous, fidgeting with her braid" or "Relaxed, slightly flushed from the heat"). Carry forward unless this exchange changes it.
+  position: precise placement and posture in the scene (e.g. "Leaning against the bar with arms crossed, facing the entrance" or "Seated across the table, hands wrapped around a mug, leaning slightly forward"). Carry forward unless this exchange moves them.`;
 
     const prompt = `[TurboTracker — mandatory instructions]
 At the very end of EVERY response, after all narrative text, append a tracker block in exactly this format:
 
 ${blockExample}
 ${userMsgSection}
-PREVIOUS TRACKER STATE — your baseline for time, location, weather, heart, and each character's name + description (stable physical traits). These carry forward unless the exchange changes them. The baseline OMITS outfit/state/position on purpose — you must RE-DERIVE them FRESH every response from the current exchange and any standing instructions in effect for this scene (Author's Note, character notes, world info). Never copy an old outfit from memory; if an Author's Note or world-info directive dictates appearance/dress, that WINS over the character's usual attire and over what they wore before:
+PREVIOUS TRACKER STATE — your baseline. Carry ALL of it forward as-is (time, location, weather, heart, and each character's name, description, outfit, state, position) UNLESS the current exchange or a standing instruction in effect for this scene (Author's Note, character notes, world info) gives a reason to change something. Do NOT invent changes when nothing has changed — a quiet exchange should keep outfit/state/position identical to the previous tracker. When a standing instruction DOES dictate a change (e.g. an Author's Note about appearance/dress), that WINS over the character's usual attire and over what they wore before — apply it even if the previous tracker still shows the old value:
 ${currentTrackerText}
 
 TIME RULES — most important field:
@@ -1901,8 +1902,8 @@ TIME RULES — most important field:
 OTHER FIELD RULES:
   • Location: update if the user's message or your response shows characters moving somewhere new.
   • Weather: update only if the exchange gives a narrative reason.
-  • Characters: add or remove only as the scene requires. Keep each present character's state/position fresh to the current moment.
-  • Outfit: reflect what each character is actually wearing THIS exchange. Do NOT copy the previous tracker's outfit forward when the scene or a standing instruction (e.g. an Author's Note about appearance/dress) indicates otherwise — an Author's Note or world-info directive about appearance WINS over the previous outfit.
+  • Characters: add or remove only as the scene requires. Keep each present character's state/position unless this exchange changes them.
+  • Outfit: by default, carry the previous outfit forward unchanged; only change it if the current exchange or a standing instruction (e.g. an Author's Note about appearance/dress) indicates a change — in that case, the Author's Note / world-info directive WINS over both the usual card attire and the previous outfit.
 
 ${heartSection}
 
