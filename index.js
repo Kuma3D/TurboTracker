@@ -51,6 +51,99 @@ function ttDebug(...args) {
     }
 }
 
+// ── Group-chat helpers ────────────────────────────────────────
+
+/** True when the active chat is a SillyTavern group chat (not a 1:1 character chat). */
+function isGroupChat(ctx) {
+    return !!(ctx && ctx.groupId);
+}
+
+/** Name of the character that authored the message at mesId (the speaking character). */
+function getSpeakerName(ctx, mesId) {
+    return ctx?.chat?.[mesId]?.name || ctx?.name2 || null;
+}
+
+/**
+ * Find the most recent heart value for a single character by scanning backwards
+ * through trackers before beforeMesId. Checks per-character heart first, then
+ * falls back to a legacy tracker's top-level heart when that character appears
+ * in it (covers trackers written before per-character hearts existed).
+ * Returns null if no prior heart is known for this character.
+ */
+function getPrevCharHeart(chat, beforeMesId, name) {
+    if (!name) return null;
+    for (let i = beforeMesId - 1; i >= 0; i--) {
+        const t = chat[i]?.extra?.tt_tracker;
+        if (!t) continue;
+        if (Array.isArray(t.characters)) {
+            const c = t.characters.find(ch => ch.name === name);
+            if (c && c.heart !== undefined && c.heart !== null && !isNaN(parseInt(c.heart, 10))) {
+                return parseInt(c.heart, 10);
+            }
+        }
+        if (t.heart !== undefined && t.heart !== null &&
+            Array.isArray(t.characters) && t.characters.some(ch => ch.name === name)) {
+            return parseInt(t.heart, 10);
+        }
+    }
+    return null;
+}
+
+/**
+ * Ensure the speaking character has a character entry in the parsed tracker.
+ * In group chats the AI often narrates in first person and omits its own card;
+ * in regular chats this is a harmless no-op (the single character is included
+ * by the AI's block). Adds a minimal entry only when absent.
+ */
+function ensureSpeakerIncluded(data, speakerName) {
+    if (!speakerName || !data) return;
+    const has = (data.characters || []).some(c => c.name === speakerName);
+    if (!has) {
+        data.characters = data.characters || [];
+        data.characters.push({
+            name: speakerName,
+            description: '', outfit: '', state: '', position: '',
+            heart: null,
+        });
+    }
+}
+
+/**
+ * Resolve per-character hearts for a group-chat AI message WITHOUT making any
+ * extra AI calls (the live flow trusts the AI's emitted per-char hearts).
+ *
+ * Rules — "only the speaking character's own emotions drive their heart":
+ *   • speaker: clamp their AI-emitted heart against their own previous value
+ *     (±maxShift). If the AI omitted it, carry their previous value forward.
+ *     If they have no previous value, start at defaultHeartValue.
+ *   • every other present character: carry their previous heart forward; new
+ *     characters default to defaultHeartValue.
+ * Sets char.heart on every present character, and data.heart (top-level) to
+ * the speaker's resolved heart for back-compat with the single-emotion baseline.
+ */
+function finalizeGroupHearts(data, chat, mesId, speakerName, s, maxShift) {
+    const def = parseInt(s.defaultHeartValue, 10) || 0;
+    const chars = data.characters || [];
+    let speakerHeart = def;
+    for (const c of chars) {
+        const isSpeaker = c.name === speakerName;
+        const prev = getPrevCharHeart(chat, mesId, c.name);
+        if (isSpeaker) {
+            const baseline = (prev !== null) ? prev : def;
+            if (c.heart !== null && c.heart !== undefined) {
+                c.heart = clampHeart(c.heart, baseline, maxShift);
+            } else {
+                c.heart = baseline;
+            }
+            speakerHeart = c.heart;
+        } else {
+            c.heart = (prev !== null) ? prev : def;
+        }
+    }
+    data.heart = speakerHeart;
+    return speakerHeart;
+}
+
 // ── Heart meter ───────────────────────────────────────────────
 
 function getHeartEmoji(points) {
@@ -695,7 +788,7 @@ function parseTrackerBlock(text) {
 
         if (inChars && line.startsWith('-')) {
             const parts = line.slice(1).trim().split('|').map(p => p.trim());
-            const char = { name: '', description: '', outfit: '', state: '', position: '' };
+            const char = { name: '', description: '', outfit: '', state: '', position: '', heart: null };
             for (const part of parts) {
                 const sep = part.indexOf(':');
                 if (sep === -1) continue;
@@ -706,6 +799,10 @@ function parseTrackerBlock(text) {
                 else if (k === 'outfit')      char.outfit      = v;
                 else if (k === 'state')       char.state       = v;
                 else if (k === 'position')    char.position    = v;
+                else if (k === 'heart') {
+                    const h = parseInt(v, 10);
+                    char.heart = isNaN(h) ? null : h;
+                }
             }
             if (char.name) result.characters.push(char);
             continue;
@@ -908,6 +1005,21 @@ function getBestPrevContext(chat, beforeMesId) {
  */
 function formatTrackerForPrompt(data) {
     if (!data) return 'None';
+    // Group chats carry heart per character; render the previous state in that
+    // shape so the AI sees individual hearts and only shifts the speaker's.
+    if (isGroupChat(getContext())) {
+        let text = `time: ${data.time || 'Unknown'}\nlocation: ${data.location || 'Unknown'}\nweather: ${data.weather || 'Unknown'}`;
+        const chars = data.characters || [];
+        if (chars.length > 0) {
+            text += '\ncharacters:';
+            for (const c of chars) {
+                const h = (c.heart !== undefined && c.heart !== null && !isNaN(parseInt(c.heart, 10)))
+                    ? (parseInt(c.heart, 10) || 0) : 'unknown';
+                text += `\n- name: ${c.name} | description: ${c.description || '???'} | outfit: ${c.outfit || '???'} | state: ${c.state || '???'} | position: ${c.position || '???'} | heart: ${h}`;
+            }
+        }
+        return text;
+    }
     const heartDisplay = (data.heart !== null && data.heart !== undefined)
         ? parseInt(data.heart, 10) || 0
         : 'unknown (not yet established)';
@@ -935,21 +1047,26 @@ function esc(text) {
 /**
  * Build the full tracker UI for a message.
  */
-function buildTrackerHtml(data, mesId, isUser = false) {
+function buildTrackerHtml(data, mesId, isUser = false, isGroup = false) {
     const heartPts   = parseInt(data.heart, 10) || 0;
     const heartEmoji = getHeartEmoji(heartPts);
 
     let charsHtml = '';
     if (data.characters && data.characters.length > 0) {
         const nameList = data.characters.map(c => esc(c.name)).join(', ');
-        const cards = data.characters.map(c => `
+        const cards = data.characters.map(c => {
+            const charHeartBadge = isGroup
+                ? `<span class="tt-char-heart">${getHeartEmoji(parseInt(c.heart, 10) || 0)} ${(parseInt(c.heart, 10) || 0).toLocaleString()}</span>`
+                : '';
+            return `
             <div class="tt-char">
-                <div class="tt-char-name">${esc(c.name)}</div>
+                <div class="tt-char-name">${esc(c.name)}${charHeartBadge}</div>
                 <div class="tt-char-field"><span class="tt-char-label">Description</span>${esc(c.description)}</div>
                 <div class="tt-char-field"><span class="tt-char-label">Outfit</span>${esc(c.outfit)}</div>
                 <div class="tt-char-field"><span class="tt-char-label">State</span>${esc(c.state)}</div>
                 <div class="tt-char-field"><span class="tt-char-label">Position</span>${esc(c.position)}</div>
-            </div>`).join('');
+            </div>`;
+        }).join('');
 
         charsHtml = `
             <div class="tt-chars-header">Characters Present: <span class="tt-chars-names">${nameList}</span></div>
@@ -960,6 +1077,14 @@ function buildTrackerHtml(data, mesId, isUser = false) {
                         <button class="tt-regen-btn menu_button menu_button_icon" data-mesid="${mesId}" data-isuser="${isUser}">
                             <i class="fa-solid fa-rotate"></i> Regenerate Tracker
                         </button>`;
+
+    // Group chats track heart per character (shown in each card), so the single
+    // global Heart Meter row is omitted. Regular chats keep it unchanged.
+    const heartRow = isGroup ? '' : `
+                <div class="tt-row">
+                    <span class="tt-label">💘 Heart Meter</span>
+                    <span class="tt-value">${heartEmoji} ${heartPts.toLocaleString()}</span>
+                </div>`;
 
     return `
         <div class="tt-container" data-mesid="${mesId}">
@@ -975,11 +1100,7 @@ function buildTrackerHtml(data, mesId, isUser = false) {
                 <div class="tt-row">
                     <span class="tt-label">🌤️ Weather</span>
                     <span class="tt-value">${esc(data.weather  || 'Unknown')}</span>
-                </div>
-                <div class="tt-row">
-                    <span class="tt-label">💘 Heart Meter</span>
-                    <span class="tt-value">${heartEmoji} ${heartPts.toLocaleString()}</span>
-                </div>
+                </div>${heartRow}
             </div>
             <details class="tt-block">
                 <summary class="tt-summary"><span>👁️ Tracker</span></summary>
@@ -1000,8 +1121,14 @@ function buildTrackerHtml(data, mesId, isUser = false) {
  * Build the inline edit form.
  */
 function buildEditFormHtml(data, mesId) {
+    // In group chats, expose per-character hearts in the textarea so they can be
+    // inspected and edited; regular chats keep the single global Heart field.
+    const group = isGroupChat(getContext());
     const charsText = (data.characters || [])
-        .map(c => `name: ${c.name} | description: ${c.description} | outfit: ${c.outfit} | state: ${c.state} | position: ${c.position}`)
+        .map(c => {
+            const base = `name: ${c.name} | description: ${c.description} | outfit: ${c.outfit} | state: ${c.state} | position: ${c.position}`;
+            return group ? `${base} | heart: ${parseInt(c.heart, 10) || 0}` : base;
+        })
         .join('\n');
 
     return `
@@ -1088,7 +1215,7 @@ function renderMessageTracker(mesId) {
         );
     }
 
-    mesText.before(buildTrackerHtml(msg.extra.tt_tracker, mesId, msg.is_user));
+    mesText.before(buildTrackerHtml(msg.extra.tt_tracker, mesId, msg.is_user, isGroupChat(ctx)));
 }
 
 /**
@@ -1145,11 +1272,21 @@ async function processMessage(mesId) {
     const data = parseTrackerBlock(msg.mes || '');
     if (data) {
         ttDebug(`  #${mesId} [TRACKER] found: time="${data.time}" heart=${data.heart} chars=${data.characters.length}`);
-        // Enforce heart shift limit in code — don't trust the AI to respect it
         const maxShift = (Number(s.heartSensitivity) || 5) * 500;
-        if (data.heart !== null) {
-            data.heart = clampHeart(data.heart, s.heartPoints, maxShift);
-            s.heartPoints = data.heart;
+        const speaker = getSpeakerName(ctx, mesId);
+        ensureSpeakerIncluded(data, speaker);
+
+        if (isGroupChat(ctx)) {
+            // Per-character hearts: only the speaking character may change.
+            const spHeart = finalizeGroupHearts(data, ctx.chat, mesId, speaker, s, maxShift);
+            s.heartPoints = spHeart; // running baseline = speaker's heart
+            ttDebug(`  #${mesId} group hearts: speaker="${speaker}" → ${spHeart} chars=${data.characters.map(c=>`${c.name}:${c.heart}`).join(',')}`);
+        } else {
+            // Single-character chat: one global heart, clamped against the baseline.
+            if (data.heart !== null) {
+                data.heart = clampHeart(data.heart, s.heartPoints, maxShift);
+                s.heartPoints = data.heart;
+            }
         }
 
         // Permanently strip the tracker block from msg.mes so it never renders again
@@ -1172,19 +1309,29 @@ async function processMessage(mesId) {
     const imported = tryImportSTTracker(msg);
     if (imported) {
         ttDebug(`  #${mesId} STTracker imported: time="${imported.time}"`);
-        // ST-Tracker has no heart data — generate one via AI
-        const prevTracker = getMostRecentTracker(ctx.chat, mesId);
-        const prevHeart = parseInt(prevTracker?.heart ?? s.heartPoints, 10) || 0;
         const maxShift = (Number(s.heartSensitivity) || 5) * 500;
+        const speaker = getSpeakerName(ctx, mesId);
+        ensureSpeakerIncluded(imported, speaker);
 
-        setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
-        try {
-            imported.heart = await generateHeartValue(msg.mes, prevHeart, maxShift);
-        } finally {
-            injectPrompt();
+        if (isGroupChat(ctx)) {
+            // ST-Tracker has no per-character hearts; carry forward each
+            // character's previous value (or default) without an extra AI call.
+            const spHeart = finalizeGroupHearts(imported, ctx.chat, mesId, speaker, s, maxShift);
+            s.heartPoints = spHeart;
+            ttDebug(`  #${mesId} group STTracker hearts: speaker="${speaker}" → ${spHeart}`);
+        } else {
+            // Single-character chat: generate one heart via AI.
+            const prevTracker = getMostRecentTracker(ctx.chat, mesId);
+            const prevHeart = parseInt(prevTracker?.heart ?? s.heartPoints, 10) || 0;
+            setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
+            try {
+                imported.heart = await generateHeartValue(msg.mes, prevHeart, maxShift);
+            } finally {
+                injectPrompt();
+            }
+            s.heartPoints = parseInt(imported.heart, 10) || 0;
+            ttDebug(`  #${mesId} STTracker heart generated: ${imported.heart} (prev=${prevHeart})`);
         }
-        s.heartPoints = parseInt(imported.heart, 10) || 0;
-        ttDebug(`  #${mesId} STTracker heart generated: ${imported.heart} (prev=${prevHeart})`);
         msg.extra = msg.extra || {};
         msg.extra.tt_tracker = imported;
         ctx.saveChat();
@@ -1227,15 +1374,47 @@ async function regenTracker(mesId) {
               Array.from(roster.values()).map(c => `- ${c.name}: ${c.description || '???'} | outfit: ${c.outfit || '???'}`).join('\n')
             : '';
 
-        // Heart instruction varies by sender
-        const heartInstr = msg.is_user
-            ? `heart must remain exactly ${prevHeart} — only the character's emotions change this, never the user.`
-            : `heart must be between ${heartLo} and ${heartHi}${heartKnown ? ` (previous value was ${prevHeart})` : ' — heart has not been established yet, infer an appropriate value from the narrative'}.`;
+        const group = isGroupChat(ctx);
+        const speaker = msg.is_user ? null : getSpeakerName(ctx, mesId);
 
-        // Build the generation prompt — unified for both user and AI messages.
-        // Context is provided both inline (for emphasis) and via the limited
-        // generateQuietPrompt conversation window (for natural chat flow).
-        const genPrompt =
+        let genPrompt;
+        if (group) {
+            // Per-character hearts; only the speaking character's heart may change.
+            const spPrevHeart = getPrevCharHeart(ctx.chat, mesId, speaker);
+            const spKnown    = spPrevHeart !== null;
+            const spPrev     = spKnown ? spPrevHeart : (parseInt(s.defaultHeartValue, 10) || 0);
+            const spLo       = Math.max(0, spPrev - maxShift);
+            const spHi       = Math.min(99999, spPrev + maxShift);
+            const speakerClause = speaker ? ` AND including the speaking character "${speaker}" even though you rarely name yourself` : '';
+            const heartInstr = msg.is_user
+                ? `This is a user message — copy every character's heart forward UNCHANGED from the previous tracker; no heart changes here.`
+                : `This response is spoken by the character "${speaker}". You MUST include "${speaker}" in the characters list. Set ONLY ${speaker}'s heart to an integer between ${spLo} and ${spHi}${spKnown ? ` (their previous value was ${spPrev})` : ' (their heart is not yet established — infer a sensible starting value from the narrative)'}. Copy every OTHER character's heart forward UNCHANGED from the previous tracker.`;
+            genPrompt =
+`[OOC: Based on the conversation context, determine the tracker state for the OPENING MOMENT of the most recent message. Think of this as a freeze-frame snapshot taken at the very first line — before any events in that message unfold. Output ONLY the tracker block — no story text, no dialogue, nothing else.
+
+IMPORTANT:
+- Time: What time is it at the VERY FIRST LINE of the most recent message? Determine this from the full conversation context — including what happened in previous messages. If previous messages described travel, a long activity, or a significant time skip, the opening of the current message should reflect that elapsed time. Do NOT advance time to reflect where events lead by the END of the current message — only the opening moment matters.
+- Location: Where are the characters standing/sitting at the VERY FIRST LINE? Ignore where they travel to later in the message.
+- Characters: Include ALL characters present in the opening moment, including {{user}} if present${speakerClause}. State and position must reflect the opening moment, not the end of the message.
+- ${heartInstr}]
+
+Previous tracker state (for reference — use context to determine how much time has passed since this):
+${prevTrackerText}
+${rosterRef}
+
+[TRACKER]
+time: ${msg.is_user && regenPrevTime ? regenPrevTime : 'h:MM AM/PM; MM/DD/YYYY (DayOfWeek)'}
+location: Where characters are at the very first line of this message
+weather: Weather description, Temperature
+characters:
+- name: CharacterName | description: Hair color, eye color, height, build, notable features | outfit: Full clothing description | state: Specific emotional/physical state | position: Precise placement and posture within the scene | heart: integer_value
+[/TRACKER]`;
+        } else {
+            // Heart instruction varies by sender
+            const heartInstr = msg.is_user
+                ? `heart must remain exactly ${prevHeart} — only the character's emotions change this, never the user.`
+                : `heart must be between ${heartLo} and ${heartHi}${heartKnown ? ` (previous value was ${prevHeart})` : ' — heart has not been established yet, infer an appropriate value from the narrative'}.`;
+            genPrompt =
 `[OOC: Based on the conversation context, determine the tracker state for the OPENING MOMENT of the most recent message. Think of this as a freeze-frame snapshot taken at the very first line — before any events in that message unfold. Output ONLY the tracker block — no story text, no dialogue, nothing else.
 
 IMPORTANT:
@@ -1256,6 +1435,7 @@ heart: ${msg.is_user ? prevHeart : `integer between ${heartLo} and ${heartHi}`}
 characters:
 - name: CharacterName | description: Hair color, eye color, height, build, notable features | outfit: Full clothing description | state: Specific emotional/physical state | position: Precise placement and posture within the scene
 [/TRACKER]`;
+        }
 
         ttDebug(`  regen #${mesId}: prevHeart=${prevHeart} range=[${heartLo},${heartHi}] prevTime="${regenPrevTime || 'none'}" roster=${roster.size} chars`);
 
@@ -1286,8 +1466,31 @@ characters:
         let data = parseTrackerBlock(response);
         ttDebug(`  regen #${mesId}: parsed=${data ? `time="${data.time}" heart=${data.heart} chars=${(data.characters||[]).map(c=>c.name).join(',')}` : 'null (no [TRACKER] block)'}`);
 
-        // Fallback: if the AI returned roleplay instead of a tracker block,
-        // build from existing tracker data.
+        // ── Retry once with a stricter coercion prompt if the AI returned no block ──
+        // Group chats (and some models) often reply with narration instead of the
+        // [TRACKER] block, which is what makes Regen appear to "do nothing". Re-ask
+        // once with a hard "begin with [TRACKER], output nothing else" instruction
+        // before falling back to existing data.
+        if (!data) {
+            ttDebug(`  regen #${mesId}: no block — retrying with strict coercion prompt`);
+            try {
+                msg.mes = (originalMes || '').slice(0, OPEN_CHARS);
+                const strictPrompt =
+`[OOC: You MUST reply with ONLY a [TRACKER]...[/TRACKER] block and ABSOLUTELY NOTHING else — no narration, no dialogue, no commentary, no markdown code fence. Begin your reply with the literal text "[TRACKER]".]
+
+${genPrompt}`;
+                const retryResp = await generateWithLimitedContext(ctx, mesId, strictPrompt, CONTEXT_WINDOW);
+                data = parseTrackerBlock(retryResp);
+                ttDebug(`  regen #${mesId}: retry parsed=${data ? `time="${data.time}" chars=${(data.characters||[]).length}` : 'null'}`);
+            } catch (e) {
+                ttDebug(`  regen #${mesId}: retry ERROR ${e.message}`);
+            } finally {
+                msg.mes = originalMes;
+            }
+        }
+
+        // Fallback: if the AI STILL returned no tracker block, build from existing
+        // tracker data (then force-include the speaker and carry hearts forward).
         if (!data) {
             ttDebug(`  regen #${mesId}: AI returned no tracker block — using fallback`);
             const existingTracker = msg.extra?.tt_tracker;
@@ -1320,6 +1523,11 @@ characters:
                 }
             }
         }
+
+        // Force-include the speaking character (AI messages) — the AI frequently
+        // narrates in first person and omits its own card. For regular chats this
+        // is a harmless no-op since the single character is already present.
+        if (speaker) ensureSpeakerIncluded(data, speaker);
 
         // ── Focused location/weather prompt (safety check) ──
         // msg.mes is restored here (after the main call), so we re-truncate
@@ -1367,7 +1575,40 @@ Cool evening, thin mountain air, 55°F]
         }
 
         // ── Heart handling ──
-        if (msg.is_user) {
+        if (group) {
+            const def = parseInt(s.defaultHeartValue, 10) || 0;
+            if (msg.is_user) {
+                // User message: carry every character's heart forward unchanged.
+                for (const c of (data.characters || [])) {
+                    const prev = getPrevCharHeart(ctx.chat, mesId, c.name);
+                    c.heart = (prev !== null) ? prev : def;
+                }
+                data.heart = def;
+                ttDebug(`  regen #${mesId}: group user hearts carried forward (${(data.characters||[]).length} chars)`);
+            } else {
+                // AI message: only the speaking character's heart updates; the
+                // rest carry forward. generateHeartValue gives calibrated values
+                // for the current sensitivity (the block heart is unreliable).
+                const spPrevHeart = getPrevCharHeart(ctx.chat, mesId, speaker);
+                const baseline = (spPrevHeart !== null) ? spPrevHeart : def;
+                ttDebug(`  regen #${mesId}: generating group heart for speaker="${speaker}" (prev=${baseline})`);
+                setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
+                try {
+                    const spHeart = await generateHeartValue(msg.mes, baseline, maxShift);
+                    const spChar = (data.characters || []).find(c => c.name === speaker);
+                    if (spChar) spChar.heart = spHeart;
+                    for (const c of (data.characters || [])) {
+                        if (c.name === speaker) continue;
+                        const prev = getPrevCharHeart(ctx.chat, mesId, c.name);
+                        c.heart = (prev !== null) ? prev : def;
+                    }
+                    data.heart = spHeart;
+                    s.heartPoints = parseInt(spHeart, 10) || 0;
+                } finally {
+                    injectPrompt(true);
+                }
+            }
+        } else if (msg.is_user) {
             data.heart = prevHeart;
         } else {
             // Always use generateHeartValue for AI messages — it has calibrated
@@ -1440,9 +1681,12 @@ function saveEditedTracker(mesId) {
     const heart    = parseInt($(`#tt-edit-heart-${mesId}`).val()) || 0;
     const charsRaw = $(`#tt-edit-chars-${mesId}`).val().trim();
 
+    const existingChars = (msg.extra?.tt_tracker?.characters || []);
+    const prevByName = new Map(existingChars.map(c => [c.name, c]));
+
     const characters = charsRaw
         ? charsRaw.split('\n').filter(l => l.trim()).map(line => {
-            const char = { name: '', description: '', outfit: '', state: '', position: '' };
+            const char = { name: '', description: '', outfit: '', state: '', position: '', heart: null };
             const parts = line.split('|').map(p => p.trim());
             for (const part of parts) {
                 const sep = part.indexOf(':');
@@ -1454,16 +1698,35 @@ function saveEditedTracker(mesId) {
                 else if (k === 'outfit')      char.outfit      = v;
                 else if (k === 'state')       char.state       = v;
                 else if (k === 'position')    char.position    = v;
+                else if (k === 'heart') {
+                    const h = parseInt(v, 10);
+                    char.heart = isNaN(h) ? null : h;
+                }
+            }
+            // Preserve the previous per-character heart when the edited line
+            // doesn't specify one (editing shouldn't silently wipe hearts).
+            if (char.heart === null && char.name && prevByName.has(char.name)) {
+                const prevH = prevByName.get(char.name).heart;
+                if (prevH !== undefined && prevH !== null) char.heart = prevH;
             }
             return char;
         }).filter(c => c.name)
         : [];
 
     msg.extra = msg.extra || {};
-    msg.extra.tt_tracker = { time, location, weather, heart, characters };
+    // In group chats, per-character hearts are authoritative; the single
+    // top-level heart field is kept for back-compat and for regular chats.
+    const groupEdit = isGroupChat(ctx);
+    let trackerHeart = heart;
+    if (groupEdit) {
+        const speaker = !msg.is_user ? getSpeakerName(ctx, mesId) : null;
+        const spChar = characters.find(c => c.name === speaker);
+        trackerHeart = (spChar && spChar.heart !== null) ? parseInt(spChar.heart, 10) : heart;
+    }
+    msg.extra.tt_tracker = { time, location, weather, heart: trackerHeart, characters };
 
     const s = getSettings();
-    s.heartPoints = Math.max(0, heart);
+    s.heartPoints = Math.max(0, trackerHeart);
 
     ctx.saveChat();
     saveSettingsDebounced();
@@ -1513,17 +1776,72 @@ function injectPrompt(includeLatestUserMsg = true) {
         return `${c.emoji} ${c.min.toLocaleString()}–${maxLabel}`;
     }).join('   ');
 
-    const prompt = `[TurboTracker — mandatory instructions]
-At the very end of EVERY response, after all narrative text, append a tracker block in exactly this format:
+    const group = isGroupChat(ctx);
 
-[TRACKER]
+    // Block-format example + heart + characters instructions diverge for group
+    // chats (per-character hearts, force-include the speaking character).
+    const blockExample = group
+        ? `[TRACKER]
+time: h:MM AM/PM; story-appropriate date (DayOfWeek)
+location: Full location description
+weather: Weather condition, temperature in °F (e.g. Warm morning sun, light mountain breeze, 65°F)
+characters:
+- name: CharacterName | description: Hair color, eye color, height, build, notable features | outfit: Full clothing description | state: Emotional/physical state | position: Precise location and posture within the scene | heart: integer_value
+[/TRACKER]`
+        : `[TRACKER]
 time: h:MM AM/PM; story-appropriate date (DayOfWeek)
 location: Full location description
 weather: Weather condition, temperature in °F (e.g. Warm morning sun, light mountain breeze, 65°F)
 heart: integer_value
 characters:
 - name: CharacterName | description: Hair color, eye color, height, build, notable features | outfit: Full clothing description | state: Emotional/physical state | position: Precise location and posture within the scene (e.g. "Seated at the bar, elbows on the counter, facing the door")
-[/TRACKER]
+[/TRACKER]`;
+
+    const changeRanges =
+`    Neutral/casual exchange:              +${Math.round(maxShift * 0.2 / 100) * 100} – +${Math.round(maxShift * 0.4 / 100) * 100}
+    Friendly/kind interaction:            +${Math.round(maxShift * 0.3 / 100) * 100} – +${Math.round(maxShift * 0.5 / 100) * 100}
+    Meaningful positive moment:           +${Math.round(maxShift * 0.5 / 100) * 100} – +${Math.round(maxShift * 0.8 / 100) * 100}
+    Major emotional event (kiss/confession): +${Math.round(maxShift * 0.8 / 100) * 100} – +${Math.round(maxShift * 1.0 / 100) * 100}
+    Negative interaction:                 -${Math.round(maxShift * 0.2 / 100) * 100} – -${Math.round(maxShift * 0.7 / 100) * 100}`;
+
+    const heartSection = group
+        ? `Heart Meter — PER CHARACTER (group chat):
+  Each character has their OWN heart value = how THAT character feels about {{user}}. Range: 0–99,999.
+  In THIS response you are roleplaying as ONE character (whichever character's turn it is).
+  Update ONLY that speaking character's heart, based on THEIR OWN emotions this exchange. Shift it by between -${maxShift} and +${maxShift} from their own previous value.
+  Copy every OTHER character's heart forward UNCHANGED from the previous tracker — do not invent shifts for characters who are not speaking.
+  Expected change amounts for this sensitivity level (applies to the speaking character only):
+${changeRanges}
+  Do NOT return tiny values like 100–200 unless sensitivity is at its minimum. Use the ranges above as your guide.
+  ${colorDesc}`
+        : `Heart Meter:
+  Tracks the CHARACTER's romantic interest in {{user}}. Starts at 0 for every new story. Range: 0–99,999.
+  Only the character's own emotions drive this — never adjust based on user actions alone.
+  Current value: ${s.heartPoints}
+  THIS RESPONSE: the heart value MUST be between ${Math.max(0, s.heartPoints - maxShift)} and ${Math.min(99999, s.heartPoints + maxShift)}. Any value outside this range is an error.
+  Expected change amounts for this sensitivity level:
+${changeRanges}
+  Do NOT return tiny values like 100–200 unless sensitivity is at its minimum. Use the ranges above as your guide.
+  ${colorDesc}`;
+
+    const charactersSection = group
+        ? `Characters section (group chat):
+  List EVERY character currently present in the scene, INCLUDING the character you are speaking as right now — you rarely name yourself in narration, but you MUST still include your own card. Never omit the speaking character.
+  Each line must use the pipe-separated format shown above, including a "heart: integer_value" field per character.
+  description: physical description — hair color, eye color, height, build, notable features. Pull from character/user card if available; infer or estimate if not.
+  state: specific emotional and/or physical condition (e.g. "Nervous, fidgeting with her braid" or "Relaxed, slightly flushed from the heat").
+  position: precise placement and posture in the scene (e.g. "Leaning against the bar with arms crossed, facing the entrance" or "Seated across the table, hands wrapped around a mug, leaning slightly forward").`
+        : `Characters section:
+  List every character currently present in the scene.
+  Each line must use the pipe-separated format shown above.
+  description: physical description — hair color, eye color, height, build, notable features. Pull from character/user card if available; infer or estimate if not.
+  state: specific emotional and/or physical condition (e.g. "Nervous, fidgeting with her braid" or "Relaxed, slightly flushed from the heat").
+  position: precise placement and posture in the scene (e.g. "Leaning against the bar with arms crossed, facing the entrance" or "Seated across the table, hands wrapped around a mug, leaning slightly forward").`;
+
+    const prompt = `[TurboTracker — mandatory instructions]
+At the very end of EVERY response, after all narrative text, append a tracker block in exactly this format:
+
+${blockExample}
 ${userMsgSection}
 PREVIOUS TRACKER STATE — your baseline. Update each field that the current exchange (user message + your response) requires; copy everything else forward exactly:
 ${currentTrackerText}
@@ -1547,26 +1865,9 @@ OTHER FIELD RULES:
   • Weather: update only if the exchange gives a narrative reason.
   • Characters: add or remove only as the scene requires.
 
-Heart Meter:
-  Tracks the CHARACTER's romantic interest in {{user}}. Starts at 0 for every new story. Range: 0–99,999.
-  Only the character's own emotions drive this — never adjust based on user actions alone.
-  Current value: ${s.heartPoints}
-  THIS RESPONSE: the heart value MUST be between ${Math.max(0, s.heartPoints - maxShift)} and ${Math.min(99999, s.heartPoints + maxShift)}. Any value outside this range is an error.
-  Expected change amounts for this sensitivity level:
-    Neutral/casual exchange:              +${Math.round(maxShift * 0.2 / 100) * 100} – +${Math.round(maxShift * 0.4 / 100) * 100}
-    Friendly/kind interaction:            +${Math.round(maxShift * 0.3 / 100) * 100} – +${Math.round(maxShift * 0.5 / 100) * 100}
-    Meaningful positive moment:           +${Math.round(maxShift * 0.5 / 100) * 100} – +${Math.round(maxShift * 0.8 / 100) * 100}
-    Major emotional event (kiss/confession): +${Math.round(maxShift * 0.8 / 100) * 100} – +${Math.round(maxShift * 1.0 / 100) * 100}
-    Negative interaction:                 -${Math.round(maxShift * 0.2 / 100) * 100} – -${Math.round(maxShift * 0.7 / 100) * 100}
-  Do NOT return tiny values like 100–200 unless sensitivity is at its minimum. Use the ranges above as your guide.
-  ${colorDesc}
+${heartSection}
 
-Characters section:
-  List every character currently present in the scene.
-  Each line must use the pipe-separated format shown above.
-  description: physical description — hair color, eye color, height, build, notable features. Pull from character/user card if available; infer or estimate if not.
-  state: specific emotional and/or physical condition (e.g. "Nervous, fidgeting with her braid" or "Relaxed, slightly flushed from the heat").
-  position: precise placement and posture in the scene (e.g. "Leaning against the bar with arms crossed, facing the entrance" or "Seated across the table, hands wrapped around a mug, leaning slightly forward").`;
+${charactersSection}`;
 
     setExtensionPrompt(EXT_NAME, prompt, extension_prompt_types.BEFORE_PROMPT, 0);
 }
@@ -2035,6 +2336,23 @@ ${prefilledCharsText}
 
             done++;
             status.text(`${done} / ${totalMessages} messages…`);
+        }
+
+        // Group chats: ensure every backfilled tracker has per-character hearts
+        // (carry forward chronologically; no extra AI calls during backfill).
+        if (isGroupChat(ctx)) {
+            for (let idx = 0; idx < ctx.chat.length; idx++) {
+                const m = ctx.chat[idx];
+                const t = m?.extra?.tt_tracker;
+                if (!t) continue;
+                for (const c of (t.characters || [])) {
+                    if (c.heart === undefined || c.heart === null) {
+                        const prev = getPrevCharHeart(ctx.chat, idx, c.name);
+                        c.heart = (prev !== null) ? prev : (parseInt(s.defaultHeartValue, 10) || 0);
+                    }
+                }
+                renderMessageTracker(idx);
+            }
         }
 
         await ctx.saveChat();

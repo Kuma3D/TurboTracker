@@ -120,6 +120,14 @@
     color: var(--SmartThemeBodyColor, #eee);
 }
 
+/* Per-character heart badge shown inside each card in group chats */
+.tt-char-heart {
+    float: right;
+    font-weight: 600;
+    opacity: 0.85;
+    font-size: 0.95em;
+}
+
 .tt-char-field {
     display: flex;
     gap: 6px;
