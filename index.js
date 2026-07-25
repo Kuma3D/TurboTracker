@@ -1798,6 +1798,11 @@ function injectPrompt(includeLatestUserMsg = true) {
     const ctx  = getContext();
     const chat = ctx?.chat || [];
 
+    // Record the chat length observed at injection time so a subsequent
+    // GENERATION_STARTED can detect a regen by the length decrease (ST deletes
+    // the regen target before firing the event).
+    lastSeenChatLen = chat.length;
+
     // Most recent tracker — concrete starting point for all fields
     let currentTrackerText = 'No previous tracker yet — this is the start of the story.';
     let baselineIdx = -1;
@@ -2451,6 +2456,13 @@ async function regenerateAllTrackers() {
 
 // ── Event handlers ────────────────────────────────────────────
 
+// Last chat length we observed (at an injectPrompt call or GENERATION_STARTED).
+// A regen deletes the target message BEFORE firing GENERATION_STARTED, so the
+// chat shrinks; a background/quiet-prompt "normal" generation does NOT shrink
+// the chat. That makes a length decrease a reliable regen signal even when ST
+// fires the regen as type="normal" (which group-chat Regenerate Message does).
+let lastSeenChatLen = -1;
+
 async function onCharacterMessageRendered(mesId) {
     const ctx = getContext();
     const msg = ctx.chat[mesId];
@@ -2484,35 +2496,66 @@ function onGenerationStarted(type) {
         return;
     }
 
+    const ctx = getContext();
+    const chat = ctx?.chat || [];
+    const curLen = chat.length;
+
     // Diagnostic: capture the last AI message's tracker state for EVERY gen
     // type (including 'normal', which is what group-chat Regenerate Message
-    // fires as). This lets us see whether #N's own stale tracker is still
-    // present during a regen — if it is, injectPrompt will pick it as the
-    // baseline instead of #N-1's.
+    // fires as).
     {
-        const ctx = getContext();
-        const chat = ctx?.chat || [];
-        const lastIdx = chat.length - 1;
+        const lastIdx = curLen - 1;
         const last = chat[lastIdx];
         if (last && !last.is_user) {
             const t = last.extra?.tt_tracker;
-            ttDebug(`  genStart state: chatLen=${chat.length} lastIdx=${lastIdx} lastIsUser=${!!last.is_user} lastHasTracker=${!!t}${t ? ` time="${t.time}" chars=${(t.characters||[]).length} mesLen=${(last.mes||'').length}` : ''}`);
+            ttDebug(`  genStart state: chatLen=${curLen} lastIdx=${lastIdx} lastIsUser=${!!last.is_user} lastHasTracker=${!!t}${t ? ` time="${t.time}" chars=${(t.characters||[]).length} mesLen=${(last.mes||'').length}` : ''} prevSeenLen=${lastSeenChatLen}`);
         }
     }
 
-    // Only reset the baseline for explicit user-triggered regenerations.
-    // 'normal' fires for background token-count / quiet-prompt operations and
-    // must be ignored here, otherwise those events corrupt s.heartPoints and
-    // re-inject the wrong baseline while a generation is already in-flight.
-    if (type !== 'regenerate' && type !== 'swipe') return;
-    const ctx = getContext();
-    const chat = ctx?.chat || [];
-    const lastMsg = chat[chat.length - 1];
+    // Detect a regen two ways:
+    //  (a) chat-length DECREASE — ST deletes the regen target before firing
+    //      GENERATION_STARTED. Group-chat Regenerate Message fires as
+    //      type="normal", so the type gate alone misses it; the length
+    //      decrease catches it. A quiet/background "normal" generation never
+    //      deletes a message, so this signal is safe against those.
+    //  (b) explicit type === regenerate|swipe (target may still be present).
+    const regenByDeletion = lastSeenChatLen > 0 && curLen < lastSeenChatLen;
+    const regenByType = type === 'regenerate' || type === 'swipe';
+
+    if (regenByDeletion) {
+        // The regen target is already gone; the last AI message is now the
+        // PREDECESSOR — exactly the baseline we want the new message to copy.
+        // Just re-inject so the prompt re-scans to it (instead of the stale
+        // tracker text embedded before the deletion). Do NOT null the last
+        // tracker — it's the good baseline, not the stale one being redone.
+        lastSeenChatLen = curLen;
+        if (chat[curLen - 1] && !chat[curLen - 1].is_user) {
+            let prevHeart = s.defaultHeartValue || 0;
+            for (let i = curLen - 1; i >= 0; i--) {
+                const h = chat[i]?.extra?.tt_tracker?.heart;
+                if (h != null) { prevHeart = parseInt(h, 10) || 0; break; }
+            }
+            s.heartPoints = prevHeart;
+            injectPrompt();
+            ttDebug(`  → Regen (deletion ${lastSeenChatLen + 1}→${curLen}) — re-injected; baseline now #${curLen - 1}, heart=${prevHeart}`);
+        }
+        return;
+    }
+
+    // Not a regen — record the length for next time and bail. (Quiet-prompt
+    // 'normal' gens land here and are correctly ignored.)
+    lastSeenChatLen = curLen;
+    if (!regenByType) return;
+
+    const lastMsg = chat[curLen - 1];
     if (!lastMsg || lastMsg.is_user) return; // Normal new generation — leave prompt alone
 
-    const lastAiIdx = chat.length - 1;
+    const lastAiIdx = curLen - 1;
     if (!chat[lastAiIdx].extra?.tt_tracker) return; // No prior swipe data yet — nothing to undo
 
+    // type=regenerate|swipe with the target still present: null its (stale)
+    // tracker so injectPrompt picks the message BEFORE it as the baseline, then
+    // restore. This is the original single-chat regen path.
     const savedTracker = chat[lastAiIdx].extra.tt_tracker;
     chat[lastAiIdx].extra.tt_tracker = null;
 
@@ -2528,7 +2571,7 @@ function onGenerationStarted(type) {
     // Restore — injectPrompt is synchronous so this is safe.
     chat[lastAiIdx].extra.tt_tracker = savedTracker;
 
-    ttDebug(`  → Regen detected — re-injected prompt with pre-#${lastAiIdx} baseline, heart=${prevHeart}`);
+    ttDebug(`  → Regen (type=${type}) — re-injected prompt with pre-#${lastAiIdx} baseline, heart=${prevHeart}`);
 }
 
 /**
