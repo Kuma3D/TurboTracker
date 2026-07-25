@@ -1800,18 +1800,23 @@ function injectPrompt(includeLatestUserMsg = true) {
 
     // Most recent tracker — concrete starting point for all fields
     let currentTrackerText = 'No previous tracker yet — this is the start of the story.';
+    let baselineIdx = -1;
     for (let i = chat.length - 1; i >= 0; i--) {
         if (chat[i]?.extra?.tt_tracker) {
-            // Carry the previous tracker forward IN FULL (including outfit/state/
-            // position) so data persists from post to post by default. The
-            // instructions below tell the AI to keep these unless the current
-            // exchange or a standing instruction (Author's Note, world info)
-            // dictates a change — that's what lets an A/N override stale data
-            // without us throwing away continuity entirely.
-            currentTrackerText = formatTrackerForPrompt(chat[i].extra.tt_tracker, false);
+            baselineIdx = i;
             break;
         }
     }
+    if (baselineIdx !== -1) {
+        const bt = chat[baselineIdx].extra.tt_tracker;
+        const firstCharOutfit = (bt.characters && bt.characters[0])
+            ? `${bt.characters[0].name}:outfit="${(bt.characters[0].outfit || '').slice(0, 40)}"` : 'no-chars';
+        ttDebug(`injectPrompt baseline: chatLen=${chat.length} pickedIdx=${baselineIdx} (isLast=${baselineIdx === chat.length - 1}) time="${bt.time}" ${firstCharOutfit}`);
+    }
+    // Re-scan and format (keeps the existing loop semantics intact).
+    currentTrackerText = baselineIdx !== -1
+        ? formatTrackerForPrompt(chat[baselineIdx].extra.tt_tracker, false)
+        : 'No previous tracker yet — this is the start of the story.';
 
     // Most recent user message — used to tell the AI what scene changes to reflect
     let latestUserMsg = '';
@@ -2477,6 +2482,22 @@ function onGenerationStarted(type) {
         setExtensionPrompt(EXT_NAME, '', extension_prompt_types.BEFORE_PROMPT, 0);
         ttDebug('  → Impersonation — TT prompt suppressed');
         return;
+    }
+
+    // Diagnostic: capture the last AI message's tracker state for EVERY gen
+    // type (including 'normal', which is what group-chat Regenerate Message
+    // fires as). This lets us see whether #N's own stale tracker is still
+    // present during a regen — if it is, injectPrompt will pick it as the
+    // baseline instead of #N-1's.
+    {
+        const ctx = getContext();
+        const chat = ctx?.chat || [];
+        const lastIdx = chat.length - 1;
+        const last = chat[lastIdx];
+        if (last && !last.is_user) {
+            const t = last.extra?.tt_tracker;
+            ttDebug(`  genStart state: chatLen=${chat.length} lastIdx=${lastIdx} lastIsUser=${!!last.is_user} lastHasTracker=${!!t}${t ? ` time="${t.time}" chars=${(t.characters||[]).length} mesLen=${(last.mes||'').length}` : ''}`);
+        }
     }
 
     // Only reset the baseline for explicit user-triggered regenerations.
