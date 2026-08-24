@@ -2523,22 +2523,30 @@ function onGenerationStarted(type) {
     const regenByType = type === 'regenerate' || type === 'swipe';
 
     if (regenByDeletion) {
-        // The regen target is already gone; the last AI message is now the
-        // PREDECESSOR — exactly the baseline we want the new message to copy.
-        // Just re-inject so the prompt re-scans to it (instead of the stale
-        // tracker text embedded before the deletion). Do NOT null the last
-        // tracker — it's the good baseline, not the stale one being redone.
+        // The regen target is already gone. Re-inject so the prompt re-scans
+        // to the most recent REMAINING tracker (the true predecessor state)
+        // instead of the stale tracker text that was baked into the prompt
+        // before the deletion.
+        //
+        // This MUST run regardless of whether the last remaining message is a
+        // user or AI message. In a 1:1 chat the predecessor of a regenerated
+        // AI message is always a USER message — gating on `!is_user` skips
+        // the re-inject entirely, leaving the deleted message's tracker as
+        // the baseline. The AI then carries that stale tracker forward verbatim
+        // on every regen, and once stored it becomes the baseline for all
+        // following messages too. Also reset the running heart baseline from
+        // the most recent remaining tracker so the new message clamps against
+        // the correct predecessor, not the stale deleted value.
+        const prevLen = lastSeenChatLen;
         lastSeenChatLen = curLen;
-        if (chat[curLen - 1] && !chat[curLen - 1].is_user) {
-            let prevHeart = s.defaultHeartValue || 0;
-            for (let i = curLen - 1; i >= 0; i--) {
-                const h = chat[i]?.extra?.tt_tracker?.heart;
-                if (h != null) { prevHeart = parseInt(h, 10) || 0; break; }
-            }
-            s.heartPoints = prevHeart;
-            injectPrompt();
-            ttDebug(`  → Regen (deletion ${lastSeenChatLen + 1}→${curLen}) — re-injected; baseline now #${curLen - 1}, heart=${prevHeart}`);
+        let prevHeart = s.defaultHeartValue || 0;
+        for (let i = curLen - 1; i >= 0; i--) {
+            const h = chat[i]?.extra?.tt_tracker?.heart;
+            if (h != null) { prevHeart = parseInt(h, 10) || 0; break; }
         }
+        s.heartPoints = prevHeart;
+        injectPrompt();
+        ttDebug(`  → Regen (deletion ${prevLen}→${curLen}) — re-injected; heart=${prevHeart}`);
         return;
     }
 
