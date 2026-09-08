@@ -301,6 +301,27 @@
     gap: 6px;
 }
 
+/* A tier = the min/max row + the meaning textarea below it */
+.tt-color-tier {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.tt-color-tier:last-child {
+    border-bottom: none;
+}
+
+.tt-color-meaning {
+    width: 100%;
+    font-size: 0.82em;
+    line-height: 1.35;
+    resize: vertical;
+    min-height: 84px;
+}
+
 .tt-color-emoji {
     font-size: 1.1em;
     min-width: 22px;

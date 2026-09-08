@@ -22,13 +22,13 @@ const DEFAULT_SETTINGS = {
     defaultHeartValue: 0,
     minTimeAdvance: 2,
     heartColors: [
-        { emoji: '🖤', min: 0,     max: 4999  },
-        { emoji: '💜', min: 5000,  max: 19999 },
-        { emoji: '💙', min: 20000, max: 29999 },
-        { emoji: '💚', min: 30000, max: 39999 },
-        { emoji: '💛', min: 40000, max: 49999 },
-        { emoji: '🧡', min: 50000, max: 59999 },
-        { emoji: '❤️', min: 60000, max: 99999 },
+        { emoji: '🖤', min: 0,     max: 4999,  meaning: "The character doesn't currently have any romantic feelings toward the user. Will not be receptive toward advances at this stage. Treats the user as a stranger or new acquaintance, keeping conversation casual and unremarkable. Volatile — can quickly move out of this stage with a single positive or memorable interaction." },
+        { emoji: '💜', min: 5000,  max: 19999, meaning: "The character is starting to develop a romantic interest in the user. Mildly receptive toward advances — flattered by attention and may respond with a smile or a slight fluster. Treats the user as a friendly acquaintance, seeking out small exchanges and reasons to be nearby. Still volatile — early interest grows quickly with warmth or stalls with indifference." },
+        { emoji: '💙', min: 20000, max: 29999, meaning: "The character has developed genuine fondness for the user and enjoys their company. Receptive toward light advances and may flirt back in a casual, unserious way. Treats the user as a trusted close friend, lingering and preferring their company over others. Moderately stable — the fondness is settling in but hasn't yet deepened into something fixed." },
+        { emoji: '💚', min: 30000, max: 39999, meaning: "The character is clearly attached to the user and values their presence, missing them when apart. Receptive and encouraged by advances — a compliment lands and lingers, a gesture is appreciated. Treats the user as someone special, actively seeking them out and dropping subtle hints. Moderately stable — the attachment is real but still largely unspoken and can be shaken by a cold turn." },
+        { emoji: '💛', min: 40000, max: 49999, meaning: "The character has openly romantic interest in the user and thinks about them when apart. Welcomes and encourages advances, reciprocating with warmth. Treats the user as a romantic prospect, actively flirting and seeking one-on-one time with small affectionate gestures. Stable — the interest is established and consistent, no longer easily dismissed." },
+        { emoji: '🧡', min: 50000, max: 59999, meaning: "The character is strongly enamored with the user, and it shows across their behavior. Eagerly reciprocates advances and frequently initiates affection themselves. Treats the user as the center of their attention, with bold flirtation, obvious favors, and a protective, competitive edge. Very stable — strong feelings that won't be quickly reduced by a single bad moment." },
+        { emoji: '❤️', min: 60000, max: 99999, meaning: "The character is deeply in love with the user and certain of it. Fully receptive and often takes the romantic lead, no longer waiting for the user to act. Treats the user as their top priority, openly declaring feelings through words, priority, and devoted gestures. Highly stable — devoted love that resists being shaken and does not easily decline." },
     ],
 };
 
@@ -1198,6 +1198,16 @@ function getSettings() {
             extension_settings[EXT_NAME][k] = Array.isArray(v) ? v.map(c => ({ ...c })) : v;
         }
     }
+    // Backfill `meaning` on heart color tiers added after the initial release,
+    // so existing installs gain the default text without wiping custom ranges.
+    if (Array.isArray(extension_settings[EXT_NAME].heartColors)) {
+        extension_settings[EXT_NAME].heartColors.forEach((c, i) => {
+            if (c.meaning === undefined) {
+                const def = DEFAULT_SETTINGS.heartColors[i];
+                c.meaning = def ? def.meaning : '';
+            }
+        });
+    }
     return extension_settings[EXT_NAME];
 }
 
@@ -1835,12 +1845,19 @@ function injectPrompt(includeLatestUserMsg = true) {
         ? `\nUSER'S CURRENT MESSAGE — use this to update location, weather, and characters if the scene requires it. Do NOT use any time-of-day mentions in this message to set the tracker time — time advances are governed by TIME RULES only:\n"${latestUserMsg}"\n`
         : '';
 
-    // Build dynamic color legend from settings
+    // Build dynamic color legend from settings — includes each tier's meaning
+    // (how the character feels at that level, receptiveness, behavior, stability)
+    // so the AI can roleplay the character at the correct emotional level. The
+    // current tier (from the running heart baseline) is marked explicitly.
     const colors = s.heartColors;
+    const currentHeartPts = parseInt(s.heartPoints, 10) || 0;
     const colorDesc = colors.map((c, i) => {
         const maxLabel = i === colors.length - 1 ? `${c.max.toLocaleString()}+` : c.max.toLocaleString();
-        return `${c.emoji} ${c.min.toLocaleString()}–${maxLabel}`;
-    }).join('   ');
+        const isCurrent = (currentHeartPts >= c.min && currentHeartPts <= c.max);
+        const marker = isCurrent ? '  ← CURRENT LEVEL' : '';
+        const meaning = (c.meaning || '').trim();
+        return `${c.emoji} ${c.min.toLocaleString()}–${maxLabel}${marker}${meaning ? ': ' + meaning : ''}`;
+    }).join('\n  ');
 
     const group = isGroupChat(ctx);
 
@@ -1888,6 +1905,7 @@ ${changeRanges}
   Expected change amounts for this sensitivity level:
 ${changeRanges}
   Do NOT return tiny values like 100–200 unless sensitivity is at its minimum. Use the ranges above as your guide.
+  Heart level meanings — for each tier: how the character feels about {{user}}, how receptive they are to advances, how they treat the user, and how stable the stage is. Roleplay the character at the level matching their current heart value, and let the stability notes guide how readily the value should shift:
   ${colorDesc}`;
 
     const charactersSection = group
@@ -2694,14 +2712,18 @@ function loadSettingsUi() {
     const maxShift = (Number(s.heartSensitivity) || 5) * 500;
 
     const colorRowsHtml = s.heartColors.map((c, i) => `
-            <div class="tt-color-row">
-                <span class="tt-color-emoji">${c.emoji}</span>
-                <label class="tt-color-range-label">Min</label>
-                <input type="number" class="tt-color-min text_pole tt-heart-num-input"
-                       data-coloridx="${i}" min="0" max="99999" value="${c.min}">
-                <label class="tt-color-range-label">Max</label>
-                <input type="number" class="tt-color-max text_pole tt-heart-num-input"
-                       data-coloridx="${i}" min="0" max="99999" value="${c.max}">
+            <div class="tt-color-tier">
+                <div class="tt-color-row">
+                    <span class="tt-color-emoji">${c.emoji}</span>
+                    <label class="tt-color-range-label">Min</label>
+                    <input type="number" class="tt-color-min text_pole tt-heart-num-input"
+                           data-coloridx="${i}" min="0" max="99999" value="${c.min}">
+                    <label class="tt-color-range-label">Max</label>
+                    <input type="number" class="tt-color-max text_pole tt-heart-num-input"
+                           data-coloridx="${i}" min="0" max="99999" value="${c.max}">
+                </div>
+                <textarea class="tt-color-meaning text_pole" data-coloridx="${i}" rows="4"
+                          placeholder="What this heart level represents — how the character feels, how receptive they are to advances, how they treat the user, and how stable this stage is.">${esc(c.meaning || '')}</textarea>
             </div>`).join('');
 
     const html = `
@@ -2848,6 +2870,13 @@ function loadSettingsUi() {
         const idx = parseInt($(this).data('coloridx'));
         const val = Math.max(0, Math.min(99999, parseInt(this.value) || 0));
         getSettings().heartColors[idx].max = val;
+        saveSettingsDebounced();
+        injectPrompt();
+    });
+
+    $('.tt-color-meaning').on('input', function () {
+        const idx = parseInt($(this).data('coloridx'));
+        getSettings().heartColors[idx].meaning = $(this).val();
         saveSettingsDebounced();
         injectPrompt();
     });
