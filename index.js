@@ -2287,8 +2287,16 @@ ${fillCharsText}
             }
 
             // ── Priority 4: Ask the AI ────────────────────────────────────
-            const { prevHeart: populatePrevHeart, prevTime: populatePrevTime } = getBestPrevContext(ctx.chat, idx);
+            const { prevHeart: populatePrevHeart, prevTime: rawPrevTime } = getBestPrevContext(ctx.chat, idx);
             const prevTrackerObj = getMostRecentTracker(ctx.chat, idx);
+
+            // An unfilled time template (e.g. "h:MM AM/PM; MM/DD/YYYY (DayOfWeek)") is not a
+            // real anchor — advanceTimeString can't parse it, so advancing it leaves the
+            // literal template in place. Treat template strings as no previous time so we
+            // ask the AI to invent one instead of propagating the placeholder down the chain.
+            const isTimeTemplate = t => !t || /h:MM\s*AM\/PM/i.test(t) || /MM\/DD\/YYYY/i.test(t);
+            const populatePrevTime = isTimeTemplate(rawPrevTime) ? null : rawPrevTime;
+            const hasPrevTime = !!populatePrevTime;
 
             ttDebug(`  #${idx} P4: AI gen — prevTime="${populatePrevTime || 'none'}" prevHeart=${populatePrevHeart}`);
 
@@ -2331,12 +2339,23 @@ ${msg.mes.slice(0, 600)}`;
                 ttDebug(`  #${idx} P4: heuristic minutes=${advanceMinutes} (msgLen=${(msg.mes || '').length})`);
             }
 
-            // Compute the final time — we own this value and the AI will not be asked to change it
-            const prefilledTime = populatePrevTime
+            // Compute the final time. With a real previous time we own the value (advance it
+            // ourselves and tell the AI not to change it). With no anchor (first tracker in
+            // the chat, or a broken chain) we show the format as a TEMPLATE and let the AI
+            // invent a story-appropriate time — we never force the literal template onto the
+            // message, which is what previously left every tracker showing "h:MM AM/PM...".
+            const prefilledTime = hasPrevTime
                 ? advanceTimeString(populatePrevTime, advanceMinutes)
                 : 'h:MM AM/PM; MM/DD/YYYY (DayOfWeek)';
+            const timeInstruction = hasPrevTime
+                ? 'The time is already set — do NOT change it.'
+                : "Invent a story-appropriate time in the exact format shown (fictional in-world date and day of week — NOT today's real date). Replace the whole time line.";
+            // When we own the time, always enforce our pre-computed value. When there's no
+            // anchor, trust the AI's invented time; if it left the literal template unchanged,
+            // null it so the UI shows "Unknown" rather than the raw template.
+            const resolveTime = aiTime => hasPrevTime ? prefilledTime : (isTimeTemplate(aiTime) ? null : aiTime);
 
-            ttDebug(`  #${idx} P4: prefilledTime="${prefilledTime}" (advance=${advanceMinutes}min)`);
+            ttDebug(`  #${idx} P4: prefilledTime="${prefilledTime}" hasPrevTime=${hasPrevTime} (advance=${advanceMinutes}min)`);
 
             // ── Step 2: Fill remaining tracker fields ─────────────────────
             const prefilledLocation  = prevTrackerObj?.location || 'Unknown';
@@ -2350,7 +2369,7 @@ ${msg.mes.slice(0, 600)}`;
                 : `- name: CharacterName | description: Hair color, eye color, height, build | outfit: Full clothing description | state: Specific emotional/physical state | position: Precise placement and posture within the scene`;
 
             const genPrompt =
-`[OOC: Complete this scene tracker. Fill each field based on the current story moment. The time is already set — do NOT change it. ${heartInstruction} Output ONLY the [TRACKER]...[/TRACKER] block — no story text, no dialogue, nothing else.]
+`[OOC: Complete this scene tracker. Fill each field based on the current story moment. ${timeInstruction} ${heartInstruction} Output ONLY the [TRACKER]...[/TRACKER] block — no story text, no dialogue, nothing else.]
 
 [TRACKER]
 time: ${prefilledTime}
@@ -2367,8 +2386,8 @@ ${prefilledCharsText}
                 const data = parseTrackerBlock(response);
                 ttDebug(`  #${idx} P4 result: ${data ? `time="${data.time}" heart=${data.heart}` : 'null — retrying'}`);
                 if (data) {
-                    // Always enforce our pre-computed time — never let the AI override it
-                    data.time = prefilledTime;
+                    // Enforce our pre-computed time when we have an anchor; otherwise keep the AI's invented time
+                    data.time = resolveTime(data.time);
                     if (heartLocked) {
                         data.heart = lockedHeartVal;
                     } else if (data.heart !== null) {
@@ -2385,7 +2404,7 @@ ${prefilledCharsText}
                     const retryData = parseTrackerBlock(retry);
                     ttDebug(`  #${idx} P4 retry: ${retryData ? `time="${retryData.time}"` : 'null — using fallback'}`);
                     if (retryData) {
-                        retryData.time = prefilledTime;
+                        retryData.time = resolveTime(retryData.time);
                         if (heartLocked) {
                             retryData.heart = lockedHeartVal;
                         } else if (retryData.heart !== null) {
@@ -2400,8 +2419,8 @@ ${prefilledCharsText}
                         // and generate heart via heuristic
                         ttDebug(`  #${idx} P4 fallback: cloning prev tracker, time="${prefilledTime}"`);
                         const fallback = prevTrackerObj
-                            ? { ...prevTrackerObj, time: prefilledTime, characters: [...(prevTrackerObj.characters || [])] }
-                            : { time: prefilledTime, location: 'Unknown', weather: 'Unknown', heart: null, characters: [] };
+                            ? { ...prevTrackerObj, time: resolveTime(null), characters: [...(prevTrackerObj.characters || [])] }
+                            : { time: resolveTime(null), location: 'Unknown', weather: 'Unknown', heart: null, characters: [] };
 
                         if (heartLocked) {
                             fallback.heart = lockedHeartVal;
